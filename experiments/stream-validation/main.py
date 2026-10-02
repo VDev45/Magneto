@@ -51,8 +51,9 @@ def create_task():
 
 @app.post("/tasks/{task_id}/select")
 def select(task_id: str, body: dict):
-    task = tasks.tasks.get(task_id)
-    if not task:
+    try:
+        task = tasks.get(task_id)
+    except KeyError:
         raise HTTPException(404, "Task not found")
     selected = {int(i) for i in body.get("file_indexes", [])}
     tasks.select_and_start(task, selected)
