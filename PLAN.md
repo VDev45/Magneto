@@ -1006,9 +1006,40 @@ Already implemented in the experiment:
 
 Still unproven:
 
-> Real-world partial torrent playback and seek behavior.
+> Seeking into undownloaded bytes during active playback.
 
-That is the immediate technical gate.
+**Playback itself is now proven** — see below. That was the blocker; seeking remains.
+
+### Partial playback: proven 2026-10-02
+
+Measured end-to-end through the HTTP API against a real qBittorrent with the
+download throttled to 250 KB/s:
+
+| | |
+|---|---|
+| Playback start | **8.6%** of the torrent complete |
+| Resolution | 1024x436, mean luma 173, 100% non-black (real decoded frames) |
+| Rate | 5.94s of video in 6s wall time — real time |
+| Events | `loadedmetadata` → `canplay` → `playing`, no error |
+| Buffer | 8s ahead |
+
+The blocker was container layout, not the streaming layer. Sintel.mp4 is
+`ftyp`(32) `free`(8) `mdat`(128641498) then `moov`(600214) at the very end, and
+no demuxer can play a frame without `moov`. Chrome requested the tail, the piece
+gate answered 425 rather than fabricate bytes, and it reported
+`PIPELINE_ERROR_READ: FFmpegDemuxer: data source error`.
+
+The fix is `toggleFirstLastPiecePrio`, enabled from `select_files`, which pulls
+the trailing index down first: the full `moov` was present 28 seconds in, at
+34.5% progress.
+
+**Known bound.** This only helps when the video is the last file in the torrent,
+because "last piece" means the last piece of the whole torrent. Sintel works
+because `Sintel.mp4` spans pieces 0–986 of 987. A video that is a small file in
+the middle is unaffected and still needs a faststart/fMP4 asset or per-piece
+prioritisation from a lower-level engine. §18's note that qBittorrent "does not
+expose arbitrary piece-priority control" still stands — this is first/last
+priority, not arbitrary priority.
 
 ---
 

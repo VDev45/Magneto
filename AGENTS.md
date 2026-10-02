@@ -150,17 +150,30 @@ Reads `{"magnet": ...}` from the request body, falling back to `MAGNET_URI` from
 
 If piece geometry is unknown (`piece_size == 0`, i.e. metadata hasn't resolved) or a piece-state query raises, it falls back to a zero-run scan. With `engine=None` there is no gating at all and behaviour is byte-identical to before.
 
-### MP4 without a faststart `moov` cannot play partially — this is not a bug
+### MP4 without a faststart `moov` cannot play partially — prioritise the index
 
-Observed live on Sintel: box layout is `ftyp`(32) `free`(8) `mdat`(128641498) then `moov` at the **end**. Chrome's demuxer must read `moov` for duration and the sample index before playing anything, so it requests the tail, gets a 425, and reports `PIPELINE_ERROR_READ: FFmpegDemuxer: data source error`.
+Observed live on Sintel: box layout is `ftyp`(32) `free`(8) `mdat`(128641498) then `moov`(600214) at the **end**. Every demuxer must read `moov` for duration and the sample table before playing a single frame, so it requests the tail, gets a 425, and reports `PIPELINE_ERROR_READ: FFmpegDemuxer: data source error`.
 
-That error means the gate did its job — it refused to fabricate the tail. Serving zeros there would not have produced playback, only a different failure. **Partial playback requires a container whose index is at the front** (faststart MP4, or Matroska with cues early). Verify the box layout before blaming the gate:
+That error is the gate doing its job — it refused to fabricate the tail. Serving zeros there would not have produced playback, only a different failure. But it does mean **playback cannot start until the index lands**, which is the whole §1 gate.
+
+The fix is in `TorrentManager._prioritize_container_index`, called from `select_files`. It enables `toggleFirstLastPiecePrio`, which raises the priority of the first and last pieces and pulls the trailing `moov` down first. Measured at a 250 KB/s throttle, the full `moov` was present **28 seconds in, at 34.5% progress**; Chrome then reached `canplay` and played in real time. Verified end-to-end through the HTTP API at **8.6%** progress: `1024x436`, 5.94s of video in 6s wall time, 100% non-black pixels.
+
+Three traps, all of which fail silently:
+
+- **`toggleFirstLastPiecePrio` is a TOGGLE, not a setter.** Posting it twice turns the setting back off. `_first_last_prio()` must read the current value first and skip the call when already on. Verified against the 5.0 WebUI API docs, not inferred.
+- **qBittorrent 5.x renamed the field to `f_l_piece_prio`.** 4.x called it `first_last_prio_pieces`; reading the old name yields `None`, which reads as "off" and would toggle an already-enabled torrent back off. Same family as `num_pieces` → `pieces_num` and `completed` → `pieces_have`.
+- **It only helps when the video is the last file in the torrent.** "Last piece" means the last piece of the whole torrent. It worked on Sintel only because `Sintel.mp4` spans pieces 0–986 of 987. For a video that is a small file in the middle, the trailing pieces belong to a different file and this does nothing. That case needs a faststart/fMP4 asset or per-piece prioritisation from a lower-level engine — this is a real bound, not a general solution.
+
+Only applied when a video file is selected: a subtitle has no index to chase, and prioritising its pieces would slow down the file the user actually wants. Engine failures are swallowed — losing the optimisation must not lose the file selection; the fallback is the old behaviour.
+
+Verify the box layout before blaming the gate:
 
 ```python
 # walk top-level boxes; if moov sits after mdat, no partial playback
 ```
 
-What is proven: bytes are never fabricated, ranges clamp to the verified frontier, 425 when nothing is available, and full-file playback once complete (verified `1024x436` frames in Chrome).
+What is proven: bytes are never fabricated, ranges clamp to the verified frontier, 425 when nothing is available, and **playback from 8.6% of a partial download**.
+
 
 ## Repo hygiene
 

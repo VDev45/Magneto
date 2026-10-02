@@ -117,10 +117,28 @@ the console starts empty, which is also the only way to exercise creating more
 than one task. The quick tunnel has no authentication, so anyone with the URL
 can add magnets until the job ends.
 
-> An MP4 whose `moov` atom sits at the **end** cannot play before that data
-> arrives — Chrome reads the tail for the sample index and fails with a demuxer
-> error. That is the piece gate correctly refusing to fabricate bytes, not a
-> bug in it. Partial playback needs a container with its index at the front.
+> **Why playback still won't start on some torrents.** An MP4 written by most
+> tools puts the `moov` atom — the sample index every demuxer needs before it
+> can play a frame — at the *end* of the file. Sintel.mp4 is
+> `ftyp`(32) `free`(8) `mdat`(128641498) then `moov`(600214) last. The player
+> asks for the tail, the piece gate answers `425` rather than fabricate bytes,
+> and it fails with a demuxer error.
+>
+> `select_files` handles this by enabling qBittorrent's
+> `toggleFirstLastPiecePrio`, which fetches the trailing index first. Verified
+> at 250 KB/s: the whole `moov` landed 28s in at 34.5% progress, and playback
+> then started at **8.6%** of the download — `1024x436`, real time, no error.
+>
+> This only helps when the video is the **last file in the torrent**, because
+> "last piece" means the last piece of the whole torrent. Sintel works because
+> `Sintel.mp4` spans pieces 0–986 of 987. A video that's a small file in the
+> middle is unaffected and still needs a faststart/fMP4 asset.
+>
+> Check the box layout before blaming the stream gate:
+>
+> ```python
+> # walk top-level boxes; if moov sits after mdat, no partial playback
+> ```
 
 ## Environment
 
