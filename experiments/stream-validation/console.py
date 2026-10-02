@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 import main
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
 
 app = main.app
 
@@ -120,8 +120,13 @@ CONSOLE_HTML = """<!doctype html>
   </div>
 </div>
 
-<script>
-let current = null, files = [];
+<script src="/console.js"></script>
+</body>
+</html>
+"""
+
+
+CONSOLE_JS = """let current = null, files = [];
 
 const $ = id => document.getElementById(id);
 const mb = b => (b / 1048576).toFixed(1) + " MB";
@@ -283,15 +288,16 @@ async function probe() {
 
 refresh();
 setInterval(refresh, 2000);
-</script>
-</body>
-</html>
 """
-
 
 @app.get("/console", response_class=HTMLResponse, include_in_schema=False)
 def console() -> str:
     return CONSOLE_HTML
+
+
+@app.get("/console.js", response_class=PlainTextResponse, include_in_schema=False)
+def console_js() -> str:
+    return CONSOLE_JS
 
 
 @app.get("/console/state", include_in_schema=False)
