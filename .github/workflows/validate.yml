@@ -46,7 +46,11 @@ jobs:
     steps:
       - name: Fail fast on leftover state from a previous run
         run: |
-          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down -v --remove-orphans || true
+          # Keep qbit-config/ so the WebUI password survives between runs --
+          # wiping it makes qBittorrent mint a new temporary password every
+          # run. The download tree is cleared explicitly instead.
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down --remove-orphans || true
+          rm -rf "$EXPERIMENT_DIR/downloads"
           pkill -f "[u]vicorn console:app" || true
           pkill -f "[u]vicorn main:app" || true
           sleep 2
@@ -141,15 +145,17 @@ jobs:
             echo "source=repository variable vars.QBIT_PASSWORD" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # qBittorrent logs: "... a temporary password is provided for this
+          # session: <PASSWORD>". Anchor on "session:" -- a loose
+          # [A-Za-z0-9]{8,} match returns the word "password" itself.
           pw=$(docker logs magneto-qbittorrent 2>&1 \
-               | grep -ioE "temporary password.*|password.*: *[A-Za-z0-9~]+" \
-               | grep -oE "[A-Za-z0-9~]{8,}" | head -1 || true)
+               | sed -n 's/.*session: *\([A-Za-z0-9~]\{6,\}\).*/\1/p' | head -1 || true)
           if [ -n "$pw" ]; then
             echo "password=$pw" >> "$GITHUB_OUTPUT"
-            echo "source=container log (first run)" >> "$GITHUB_OUTPUT"
+            echo "source=container log (temporary password)" >> "$GITHUB_OUTPUT"
           else
             echo "password=adminadmin" >> "$GITHUB_OUTPUT"
-            echo "source=fallback default -- SET vars.QBIT_PASSWORD if login fails" >> "$GITHUB_OUTPUT"
+            echo "source=FALLBACK DEFAULT -- login will 401, set vars.QBIT_PASSWORD" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Start the console API
@@ -184,13 +190,18 @@ jobs:
         run: |
           set -euo pipefail
           echo "Submitting magnet -- resolves metadata, does not start downloading."
-          curl -sS -X POST "http://127.0.0.1:${{ inputs.port }}/tasks" \
+          # -f so an HTTP error fails the step. Plain curl exits 0 on a 500,
+          # which previously let a failed task creation report as SUCCESS.
+          curl -fsS -X POST "http://127.0.0.1:${{ inputs.port }}/tasks" \
             -H 'Content-Type: application/json' \
             -d "$(python3 -c 'import json,sys; print(json.dumps({"magnet": sys.argv[1]}))' '${{ steps.magnet.outputs.value }}')" \
-            | tee "$RUNNER_TEMP/task.json"
+            | tee "$RUNNER_TEMP/task.json" || {
+            echo "::error::POST /tasks failed. Almost always a qBittorrent auth problem."
+            echo "Set repository variable QBIT_PASSWORD and re-run."
+            exit 1
+          }
           echo
-          echo "If this fails with 401/500 the qBittorrent password is wrong."
-          echo "Set repository variable QBIT_PASSWORD and re-run."
+          echo "task.json written to \$RUNNER_TEMP/task.json"
 
       - name: Test summary
         run: |
@@ -249,4 +260,5 @@ jobs:
         run: |
           [ -f "$RUNNER_TEMP/console.pid" ] && kill "$(cat "$RUNNER_TEMP/console.pid")" 2>/dev/null || true
           pkill -f "[u]vicorn console:app" || true
-          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down -v --remove-orphans || true
+          # No -v: preserves qbit-config/ and therefore the WebUI password.
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down --remove-orphans || true
