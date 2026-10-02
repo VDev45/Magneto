@@ -275,13 +275,24 @@ jobs:
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Console: $url/console"
 
-          # Prove the tunnel actually forwards, rather than trusting the URL.
-          code=$(curl -s -o /dev/null -w '%{http_code}' "$url/console")
-          echo "tunnel self-check: GET /console -> HTTP $code"
+          # Prove the tunnel forwards, rather than trusting the printed URL.
+          # cloudflared logs the hostname before the edge is actually
+          # routable, so the first attempt fails DNS resolution (curl exit 6).
+          # `|| true` matters: under `set -e` a bare failing curl aborts the
+          # step and the real reason is never printed.
+          code=""
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$url/console" || true)
+            [ "$code" = "200" ] && break
+            echo "::debug::tunnel self-check ${i}: ${code:-unreachable}"
+            sleep 3
+          done
           if [ "$code" != "200" ]; then
-            echo "::error::Tunnel is up but not forwarding to the console."
+            echo "::error::Tunnel published a URL but never reached the console (last: ${code:-unreachable})."
+            tail -20 "$RUNNER_TEMP/tunnel.log"
             exit 1
           fi
+          echo "tunnel self-check: GET /console -> HTTP $code"
 
       - name: Start the magnet
         env:
