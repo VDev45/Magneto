@@ -411,6 +411,29 @@ jobs:
       - name: Hold open for manual testing
         run: |
           set -euo pipefail
+          # No magnet means "Start the magnet" exited before writing task.json,
+          # so there is nothing to poll. That is the supported blank-magnet
+          # mode, not a failure: hold the console open for a human to paste one
+          # and watch the tunnel come up. jq on a missing file also exits 2,
+          # which under `set -e` killed the job before it could report that.
+          if [ ! -f "$RUNNER_TEMP/task.json" ]; then
+            echo "No task yet. Holding the console open -- paste a magnet to begin."
+            echo "Console: ${{ steps.tunnel.outputs.url }}/console"
+            while true; do
+              console_code=$(curl -s -o /dev/null -m 5 -w "%{http_code}" \
+                "http://127.0.0.1:${{ inputs.port }}/console" || true)
+              task_count=$(curl -fsS -m 10 \
+                "http://127.0.0.1:${{ inputs.port }}/console/state" 2>/dev/null \
+                | jq '.tasks | length' 2>/dev/null || echo 0)
+              printf "[%s] console=%s tasks=%s (waiting for a magnet)\n" \
+                "$(date -Is)" "$console_code" "$task_count"
+              [ "$task_count" != "0" ] && echo "Task appeared -- re-dispatch if you need the per-piece heartbeat."
+              sleep 15
+            done
+            echo "Manual hold ended because the workflow was cancelled or GitHub reached its job timeout."
+            exit 0
+          fi
+
           task_id=$(jq -r '.id // empty' "$RUNNER_TEMP/task.json")
           [ -n "$task_id" ] || { echo "::error::No task ID found"; exit 1; }
           echo "Console: ${{ steps.tunnel.outputs.url }}/console"
@@ -447,7 +470,8 @@ jobs:
           tail -80 "$RUNNER_TEMP/tunnel.log" || true
           echo "::endgroup::"
           echo "::group::Final task state"
-          cat "$RUNNER_TEMP/task.json" "$RUNNER_TEMP/last-task.json" "$RUNNER_TEMP/last-state.json" 2>/dev/null || true
+          cat "$RUNNER_TEMP/task.json" "$RUNNER_TEMP/last-task.json" \
+              "$RUNNER_TEMP/last-state.json" 2>/dev/null || true
           echo "::endgroup::"
           echo "::group::qBittorrent diagnostics"
           docker ps -a --filter name=magneto-qbittorrent
