@@ -52,9 +52,14 @@ class ConsoleHtmlTests(unittest.TestCase):
     def test_console_page_is_served(self):
         html = console.console()
         self.assertIn("<!doctype html>", html)
-        self.assertIn("/console/state", html)
+        self.assertIn('<script src="/console.js"></script>', html)
         # The probe is the thing that proves 206 Partial Content works.
         self.assertIn("206 Partial Content OK", html)
+
+    def test_console_js_contains_api_poll(self):
+        js = console.console_js()
+        self.assertIn("/console/state", js)
+        self.assertIn("async function createTask", js)
 
 
 if __name__ == "__main__":
