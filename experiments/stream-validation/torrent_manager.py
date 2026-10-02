@@ -76,7 +76,15 @@ class TorrentManager:
         torrent = torrents[0]
         task.name = torrent["name"]
         task.progress = torrent["progress"]
-        task.state = TaskState.COMPLETED if torrent["progress"] >= 1 else TaskState.DOWNLOADING
+        qbit_state = torrent.get("state", "")
+        if torrent["progress"] >= 1:
+            task.state = TaskState.COMPLETED
+        elif qbit_state in {"pausedDL", "queuedDL"}:
+            task.state = TaskState.QUEUED
+        elif qbit_state in {"metaDL", "checkingDL"}:
+            task.state = TaskState.METADATA
+        else:
+            task.state = TaskState.DOWNLOADING
 
         files = self._get(
             "/api/v2/torrents/files", hash=task.torrent_hash
