@@ -95,15 +95,16 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
+      # No actions/setup-python here: it publishes no Arch Linux builds, and
+      # self-hosted runners should use the interpreter the host already has.
+      # The 3.11 floor is asserted by the prerequisite check above.
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r "$EXPERIMENT_DIR/requirements.txt"
-          python -m unittest discover -s "$EXPERIMENT_DIR" -t "$EXPERIMENT_DIR" -v
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --upgrade pip
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet -r "$EXPERIMENT_DIR/requirements.txt"
+          "$RUNNER_TEMP/venv/bin/python" -m unittest discover -s "$EXPERIMENT_DIR" -t "$EXPERIMENT_DIR" -v
 
       - name: Resolve magnet
         id: magnet
@@ -159,7 +160,8 @@ jobs:
           set -euo pipefail
           mkdir -p "$LOCAL_SAVE_PATH"
           cd "$EXPERIMENT_DIR"
-          nohup python -m uvicorn console:app --host 0.0.0.0 --port "${{ inputs.port }}" \
+          nohup "$RUNNER_TEMP/venv/bin/python" -m uvicorn console:app \
+            --host 0.0.0.0 --port "${{ inputs.port }}" \
             > "$RUNNER_TEMP/console.log" 2>&1 &
           echo $! > "$RUNNER_TEMP/console.pid"
           echo "log: $RUNNER_TEMP/console.log"
