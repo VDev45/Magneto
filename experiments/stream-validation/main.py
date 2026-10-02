@@ -32,16 +32,22 @@ def root():
 
 
 @app.post("/tasks")
-def create_task():
-    magnet = os.getenv("MAGNET_URI")
+def create_task(body: dict | None = None):
+    # A per-request magnet is what makes multi-task and queue testing possible.
+    # MAGNET_URI stays as a fallback so the README's single-magnet flow is
+    # unaffected.
+    magnet = (body or {}).get("magnet") or os.getenv("MAGNET_URI")
     if not magnet:
-        raise HTTPException(400, "MAGNET_URI is required")
+        raise HTTPException(
+            400, "Provide a magnet in the request body or set MAGNET_URI"
+        )
 
     task = tasks.create(str(uuid4()), magnet)
     torrents.login()
     tasks.prepare(task, SAVE_PATH)
     return {
         "id": task.id,
+        "magnet": task.magnet,
         "hash": task.torrent_hash,
         "name": task.name,
         "state": task.state,

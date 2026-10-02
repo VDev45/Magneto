@@ -46,13 +46,29 @@ export MAGNET_URI='magnet:?xt=urn:btih:...'
 export QBIT_PASSWORD='your-password'
 ```
 
-5. Start the validator:
+5. Start the validator.
 
-```export MAGNET_URI='magnet:?xt=urn:btih:...'```
+   It must run from **inside this directory** — the modules use flat imports, so
+   `main:app` only resolves when this directory is on `sys.path`. The
+   `LOCAL_SAVE_PATH` default is repo-root-relative, which would otherwise
+   resolve to `experiments/stream-validation/experiments/stream-validation/downloads`,
+   so set it explicitly:
 
-6. Start the validator:
+```bash
+cd experiments/stream-validation
+export LOCAL_SAVE_PATH="$PWD/downloads"
+uvicorn main:app --reload
+```
 
-```python experiments/stream-validation/app.py
+   Interactive API docs are at http://127.0.0.1:8000/docs.
+
+6. Create a task. `POST /tasks` reads the magnet from the request body and falls
+   back to `MAGNET_URI` when no body is sent:
+
+```bash
+curl -X POST localhost:8000/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"magnet":"magnet:?xt=urn:btih:..."}'
 ```
 
 7. Use `POST /tasks/{task_id}/select` to select a video file, then open `/stream/{task_id}/{file_index}` in VLC/MX Player.

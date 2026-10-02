@@ -9,6 +9,10 @@ class FakeTorrentManager:
         self.started = []
         self.stopped = []
         self.removed = []
+        self.logged_in = 0
+
+    def login(self):
+        self.logged_in += 1
 
     def add_magnet(self, task, save_path):
         pass
