@@ -136,14 +136,43 @@ async function api(path, opts) {
 }
 
 async function createTask() {
-  const magnet = $("magnet").value.trim();
-  const opts = { method: "POST", headers: { "Content-Type": "application/json" },
-                 body: JSON.stringify(magnet ? { magnet } : {}) };
-  const r = await api("/tasks", opts);
-  $("createMsg").innerHTML = r.ok
-    ? '<span class="v">created ' + esc(r.json.id) + "</span>"
-    : '<span class="err">' + r.status + " " + esc(r.json?.detail || r.body) + "</span>";
-  refresh();
+  const input = $("magnet");
+  const button = document.querySelector('button[onclick="createTask()"]');
+  const message = $("createMsg");
+  const magnet = input.value.trim();
+
+  if (magnet && !magnet.toLowerCase().startsWith("magnet:?")) {
+    message.innerHTML = '<span class="err">That does not look like a magnet URI.</span>';
+    input.focus();
+    return;
+  }
+
+  button.disabled = true;
+  message.innerHTML = '<span class="mut">Creating task… waiting for qBittorrent to resolve metadata.</span>';
+
+  try {
+    const opts = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(magnet ? { magnet } : {})
+    };
+    const r = await api("/tasks", opts);
+
+    if (r.ok) {
+      message.innerHTML = '<span class="v">created ' + esc(r.json.id) +
+        ' — ' + esc(r.json.name || 'metadata ready') + '</span>';
+      input.value = "";
+      await refresh();
+      await pick(r.json.id);
+    } else {
+      message.innerHTML = '<span class="err">Create failed (' + r.status + '): ' +
+        esc(r.json?.detail || r.body || 'unknown error') + '</span>';
+    }
+  } catch (e) {
+    message.innerHTML = '<span class="err">Create failed: ' + esc(e?.message || e) + '</span>';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function refresh() {
