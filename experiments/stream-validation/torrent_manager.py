@@ -12,6 +12,9 @@ from requests import HTTPError
 
 from models import Task, TaskState, TorrentFile
 
+# qBittorrent piece state codes: 0 not downloaded, 1 in progress, 2 complete.
+DOWNLOADED_PIECE = 2
+
 
 class TorrentManager:
     """qBittorrent adapter. Nothing outside this class talks to its API."""
@@ -160,17 +163,37 @@ class TorrentManager:
         files = self._get(
             "/api/v2/torrents/files", hash=task.torrent_hash
         )
-        task.files = [
-            TorrentFile(
-                index=f["index"],
-                name=f["name"].rsplit("/", 1)[-1],
-                size=f["size"],
-                progress=f["progress"],
-                priority=f["priority"],
-                path=f["name"],
+        # Piece size is a torrent-wide property; every file shares it.
+        piece_size = 0
+        properties = self._get(
+            "/api/v2/torrents/properties", hash=task.torrent_hash
+        )
+        if properties:
+            piece_size = int(properties.get("piece_size") or 0)
+
+        # qBittorrent reports piece_range per file but not the byte offset,
+        # so derive the offset by accumulating preceding file sizes. Files are
+        # laid out in index order, so this is exact rather than a guess.
+        task.files = []
+        running_offset = 0
+        for f in files:
+            span = f.get("piece_range")
+            task.files.append(
+                TorrentFile(
+                    index=f["index"],
+                    name=f["name"].rsplit("/", 1)[-1],
+                    size=f["size"],
+                    progress=f["progress"],
+                    priority=f["priority"],
+                    path=f["name"],
+                    offset=running_offset,
+                    piece_size=piece_size,
+                    piece_range=(int(span[0]), int(span[1]))
+                    if span
+                    else None,
+                )
             )
-            for f in files
-        ]
+            running_offset += int(f["size"])
 
     def select_files(self, task: Task, selected: set[int]) -> None:
         if not task.torrent_hash:
@@ -214,6 +237,58 @@ class TorrentManager:
         return self._get(
             "/api/v2/torrents/pieceStates", hash=task.torrent_hash
         )
+
+    def first_missing_piece(
+        self, task: Task, first: int, last: int
+    ) -> int | None:
+        """Lowest piece index in [first, last] that is not yet downloaded.
+
+        Piece states are 0=not downloaded, 1=in progress, 2=complete, so
+        anything below 2 is bytes we must not serve. Returns None when the
+        whole span is complete.
+
+        A span reaching past the end of the reported array counts as
+        missing. The engine not describing a piece is not evidence that the
+        piece is downloaded, and assuming otherwise would reintroduce the
+        sparse-zero reads this method exists to prevent.
+        """
+        if last < first:
+            return None
+        states = self.piece_states(task)
+        if not states:
+            return first
+        for piece in range(first, last + 1):
+            if piece >= len(states) or states[piece] < DOWNLOADED_PIECE:
+                return piece
+        return None
+
+    def wait_for_pieces(
+        self,
+        task: Task,
+        first: int,
+        last: int,
+        timeout: float = 30.0,
+        poll_interval: float = 0.25,
+    ) -> int | None:
+        """Block until pieces [first, last] are all downloaded.
+
+        Returns the lowest still-missing piece index, or None when the span
+        completed. The bounded timeout matters: a media player holding a
+        request open forever is worse than an honest short response, so this
+        never waits indefinitely.
+
+        This is the piece-on-demand wait that PLAN.md §12 leaves open. It
+        reads only engine-reported piece states, so it works whether the
+        data arrived from a peer or was restored from a previous session.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            missing = self.first_missing_piece(task, first, last)
+            if missing is None:
+                return None
+            if time.monotonic() >= deadline:
+                return missing
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
     def status(self, task: Task) -> dict[str, Any] | None:
         """Raw engine info for one task, or None if the torrent is gone.

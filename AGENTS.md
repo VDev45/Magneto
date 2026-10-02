@@ -127,11 +127,30 @@ Reads `{"magnet": ...}` from the request body, falling back to `MAGNET_URI` from
 - Assert on `FakeTorrentManager.started` / `.stopped` / `.removed` to verify engine calls, and on `task.state` to verify lifecycle.
 - There's no `pytest`, no parametrization, no fixtures — plain `unittest.TestCase`.
 
-## Not yet implemented (don't assume it works)
+## The stream gate waits for pieces; it never serves sparse zeros
 
-`stream_manager.stream_file` reads bytes straight off disk and **does not wait for pieces**. It raises 425 only when the file doesn't exist at all; for a sparse preallocated file, ranges that aren't downloaded yet are served as zeros. This is why `PLAN.md` §12 (piece-on-demand) is still open and why "real-world partial playback and seek behavior" is listed as *unproven* in §33.
+`stream_file` takes an `engine` (the `TorrentManager`) and gates every range on real piece state. The mechanics:
 
-That's the project's whole purpose. If you're asked to make playback work before the torrent completes, that's a substantive engineering task, not a bug fix.
+- `TorrentFile.piece_span(start, end)` maps file-relative bytes to piece indices using `offset` + `piece_size`. `piece_start_byte(piece)` inverts it and clamps at 0, because bytes before a file's first byte belong to a *neighbouring* file in the same piece.
+- `TorrentManager.first_missing_piece` / `wait_for_pieces` poll `pieceStates`. State `1` (downloading) counts as **missing** — treating it as available is the exact bug that produced zeros.
+- A span reaching **past the end of the reported array is missing**, not present. The engine not describing a piece is not evidence it's downloaded.
+- The response is clamped to the piece boundary, so `Content-Length` always matches the bytes actually sent. The old loop could `break` early and still promise the full length in the header, hanging the client.
+- Truncated responses carry `X-Magneto-Truncated: piece-gate`, so a client knows to re-request rather than treat it as a broken transfer.
+- `STREAM_PIECE_WAIT` (default 30s) bounds the wait. A player holding a request open forever is worse than an honest short response — it can retry, but it can't wait on a socket that never speaks.
+
+If piece geometry is unknown (`piece_size == 0`, i.e. metadata hasn't resolved) or a piece-state query raises, it falls back to a zero-run scan. With `engine=None` there is no gating at all and behaviour is byte-identical to before.
+
+### MP4 without a faststart `moov` cannot play partially — this is not a bug
+
+Observed live on Sintel: box layout is `ftyp`(32) `free`(8) `mdat`(128641498) then `moov` at the **end**. Chrome's demuxer must read `moov` for duration and the sample index before playing anything, so it requests the tail, gets a 425, and reports `PIPELINE_ERROR_READ: FFmpegDemuxer: data source error`.
+
+That error means the gate did its job — it refused to fabricate the tail. Serving zeros there would not have produced playback, only a different failure. **Partial playback requires a container whose index is at the front** (faststart MP4, or Matroska with cues early). Verify the box layout before blaming the gate:
+
+```python
+# walk top-level boxes; if moov sits after mdat, no partial playback
+```
+
+What is proven: bytes are never fabricated, ranges clamp to the verified frontier, 425 when nothing is available, and full-file playback once complete (verified `1024x436` frames in Chrome).
 
 ## Repo hygiene
 

@@ -24,12 +24,24 @@ from typing import Any
 
 import requests
 
-# Container magic numbers. An MP4 begins with a 'ftyp' box; Matroska (which is
+# Container magic numbers. An MP4 begins with an 'ftyp' box; Matroska (which is
 # what most remuxed releases are) begins with the EBML magic. Anything else
 # means we served bytes from the wrong place.
-MP4_MAGIC = b"\x00\x00\x00\x14ftyp"
-MP4_MAGIC_SHORT = b"\x00\x00\x00\x18ftyp"
+#
+# Match the MP4 on the box *type*, not on a hardcoded box size. The four bytes
+# before 'ftyp' are a length that varies with the brand list -- Sintel uses
+# 0x20 -- so pinning specific sizes reported a false WARN on perfectly valid
+# files.
 MATROSKA_MAGIC = b"\x1a\x45\xdf\xa3"
+
+
+def looks_like_container(head: bytes) -> bool:
+    if head.startswith(MATROSKA_MAGIC):
+        return True
+    # MP4/QuickTime: a 32-bit big-endian box length, then the box type. Any
+    # length is fine as long as the type is ftyp, and a length of 1 signals a
+    # 64-bit largesize field, which is also legal.
+    return len(head) >= 8 and head[4:8] in (b"ftyp", b"moov", b"mdat", b"free")
 
 
 @dataclass
@@ -211,26 +223,29 @@ def check_range(base: str, task: dict[str, Any], report: Report) -> None:
     )
 
     head = response.content[:8]
-    is_container = (
-        head.startswith(MP4_MAGIC)
-        or head.startswith(MP4_MAGIC_SHORT)
-        or head.startswith(MATROSKA_MAGIC)
-    )
-    if is_container:
-        report.add("payload is a real container", True, f"magic {head[:4]!r}")
+    if looks_like_container(head):
+        report.add("payload is a real container", True, f"magic {head[4:8]!r}")
     elif not any(response.content):
-        # Documented limitation, not a regression: stream_file reads the
-        # preallocated file without waiting for pieces, so a range past what
-        # has been downloaded is served as zeros. PLAN.md §12.
+        # The piece gate should make this unreachable: it clamps responses to
+        # the verified frontier rather than handing back sparse zeros. If this
+        # fires, the gate regressed. PLAN.md §12.
         report.warn(
             "payload is a real container",
-            "all zeros -- range landed past the downloaded region "
-            "(PLAN.md §12, piece-on-demand not implemented)",
+            "all zeros -- the gate served a sparse hole, which it should never do",
         )
     else:
         report.warn(
             "payload is a real container",
             f"no container magic in {head.hex()}",
+        )
+
+    # A gated response is shorter than asked for, and says so. Anything else
+    # means the gate is not engaged.
+    if response.headers.get("X-Magneto-Truncated"):
+        report.add(
+            "gate advertises truncation",
+            True,
+            f"{response.headers['Content-Range']} (shortened by the piece gate)",
         )
 
 

@@ -121,7 +121,9 @@ def stream(task_id: str, file_index: int, request: Request):
         raise HTTPException(415, "Selected file is not a video")
 
     task.state = TaskState.STREAMING
-    return stream_file(request, task, torrent_file, files)
+    # Pass the engine so the stream waits for the pieces covering the
+    # requested range instead of serving sparse zeros (PLAN.md §12).
+    return stream_file(request, task, torrent_file, files, engine=torrents)
 
 @app.post("/tasks/{task_id}/cancel")
 def cancel(task_id: str):

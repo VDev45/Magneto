@@ -32,7 +32,20 @@ class SerialisationTests(unittest.TestCase):
         payload = make("Sintel.mp4").to_dict()
         self.assertEqual(
             set(payload),
-            {"index", "name", "size", "progress", "priority", "path", "is_video"},
+            {
+                "index",
+                "name",
+                "size",
+                "progress",
+                "priority",
+                "path",
+                "is_video",
+                # Piece geometry, so the console can show why a range was
+                # short and clients can reason about availability.
+                "offset",
+                "piece_size",
+                "piece_range",
+            },
         )
 
     def test_is_serialisable_to_json(self):

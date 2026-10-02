@@ -21,6 +21,38 @@ class TorrentFile:
     progress: float
     priority: int
     path: str
+    # Byte offset of this file's first byte within the whole torrent, and the
+    # torrent's piece size. Together they map a file-relative byte offset onto
+    # a piece index, which is what makes waiting for real data possible.
+    offset: int = 0
+    piece_size: int = 0
+    # Inclusive [first, last] piece span as reported by the engine. Kept
+    # alongside the arithmetic so the two can be cross-checked in tests.
+    piece_range: tuple[int, int] | None = None
+
+    def piece_span(self, start: int, end: int) -> tuple[int, int] | None:
+        """Inclusive piece indices covering file bytes [start, end].
+
+        Returns None when the piece size is unknown, which happens before
+        metadata resolves. Callers must treat that as "cannot reason about
+        availability" and fall back to serving without waiting.
+        """
+        if self.piece_size <= 0:
+            return None
+        first = (self.offset + start) // self.piece_size
+        last = (self.offset + end) // self.piece_size
+        return first, last
+
+    def piece_start_byte(self, piece: int) -> int:
+        """File-relative byte offset where the given piece begins.
+
+        Bytes before this offset within the same piece belong to an
+        earlier file, so a partial wait must stop here rather than
+        spilling into a neighbour's bytes.
+        """
+        if self.piece_size <= 0:
+            return 0
+        return max(0, piece * self.piece_size - self.offset)
 
     @property
     def is_video(self) -> bool:
@@ -44,6 +76,11 @@ class TorrentFile:
             "priority": self.priority,
             "path": self.path,
             "is_video": self.is_video,
+            "offset": self.offset,
+            "piece_size": self.piece_size,
+            "piece_range": list(self.piece_range)
+            if self.piece_range
+            else None,
         }
 
 
