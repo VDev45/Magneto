@@ -167,13 +167,37 @@ CONSOLE_HTML = """<!doctype html>
     </div>
 
     <div class="card">
+      <h2>Seek tester — the last open question in PLAN.md §36</h2>
+      <div class="sub">Playback from a partial file is proven. Seeking
+        <em>into undownloaded bytes</em> was measured and <em>does not work</em>:
+        the gate waits for the pieces but has no way to ask qBittorrent for
+        them, and the Web API has no per-piece priority call. This probes an
+        arbitrary byte offset and reports what the server actually returned, so
+        the failure mode is a number instead of a shrug.</div>
+
+      <div class="row">
+        <button data-act="seekProbe" class="ghost">Probe current position</button>
+        <button data-act="seekMid" class="ghost">Probe 50%</button>
+        <button data-act="seekTail" class="ghost">Probe 99%</button>
+      </div>
+      <div class="row">
+        <input id="seekOffset" placeholder="byte offset, or a time like 90s / 12:30" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="row"><button data-act="seekInput">Probe this offset</button></div>
+      <pre id="seekOut" class="mut">Not probed yet.</pre>
+    </div>
+
+    <div class="card">
       <h2>Player</h2>
       <video id="player" controls preload="metadata" playsinline></video>
       <div class="row" style="margin-top:10px">
         <input id="vlcUrl" readonly placeholder="stream URL — copy into VLC / MX Player">
       </div>
       <div class="row"><button class="ghost" data-act="copyVlc">Copy stream URL</button></div>
-      <div class="sub">VLC/MX Player is the real gate (PLAN.md §23). Far-ahead seeking on a partial file does not work reliably in a browser.</div>
+      <div class="sub">VLC/MX Player is the real gate (PLAN.md §23). A browser cannot seek
+        past what is on disk, and the downloaded pieces are not contiguous — use
+        the seek tester above to see how far playback could actually get from a
+        given offset.</div>
     </div>
   </div>
 </div>

@@ -985,6 +985,8 @@ Important components include:
 - file_manager.py
 - stream_manager.py
 - main.py
+- console.py / console.js — the browser console and seek tester (served verbatim)
+- smoke_test.py — the scripted validation the CI workflow runs
 - test_task_manager.py
 - docker-compose.yml
 - requirements.txt
@@ -1002,13 +1004,58 @@ Already implemented in the experiment:
 - cancellation
 - torrent removal
 - piece-state inspection
+- container-index and sequential piece prioritisation
+- on-disk byte availability reporting (the seek tester's backend)
 - lifecycle tests
 
-Still unproven:
+### Seeking: measured 2026-10-02, and it is an engine limitation
 
-> Seeking into undownloaded bytes during active playback.
+**Answer: no. Seeking into undownloaded bytes does not work, and cannot be made
+to work through the qBittorrent Web API.** Measured with the console's seek
+tester against a real throttled Sintel download:
 
-**Playback itself is now proven** — see below. That was the blocker; seeking remains.
+| Probe | Result |
+|---|---|
+| byte 0 (inside the frontier) | `206`, full 64 KB, 12 ms — clean |
+| prefix + 2 MB (engine actively fetching there) | `206` after an **8–11 s** wait; the piece landed mid-request |
+| 50%, 90%, 98% (ahead of the download) | **`425` after the full 30 s `STREAM_PIECE_WAIT`** |
+
+The 425s are the gate working. It waits for the pieces, they never arrive, and
+it refuses rather than serving the sparse zeros qBittorrent preallocates. But the
+wait is wasted: **the gate can poll `pieceStates` and it cannot ask.** There is
+no per-piece priority endpoint in the Web API at all. Checked against the 5.0
+docs and probed on a live 5.2.4 — `setPiecePrio`, `piecePrio` and
+`setPiecePriority` all return `Endpoint does not exist`, while `increasePrio` and
+`topPrio` move *files*, not pieces. The only piece-related endpoints that exist
+are `pieceStates` (read), `pieceHashes` (read) and `toggleFirstLastPiecePrio`.
+
+So the `SEEK → NEW PIECES` arrow in §36 cannot be closed by waiting harder. It
+needs the `LibtorrentEngine` swap, which is the condition §36's "change the
+torrent-engine strategy" clause already anticipates. A seek *does* succeed when
+the download is already heading for that region (row 2 above) — which is what
+sequential mode buys, below.
+
+### There is no single "frontier": sequential download is the real lever
+
+libtorrent selects rarest-first by default, so complete pieces scatter and the
+number a player starting at byte 0 can actually reach — the **prefix**, the
+unbroken run from byte 0 — falls far behind overall progress. Measured on
+Sintel at 35.02% complete: 333 of 987 pieces in **217 separate runs**, with the
+prefix at **1.01%**. A third of the file on disk, and 1% of it playable.
+
+`select_files` now also enables `toggleSequentialDownload`, and the prefix
+tracks progress directly:
+
+| Overall | 12.56% | (was 35.02%) |
+|---|---|---|
+| **Prefix, sequential on** | **9.73%** (3 points behind) | |
+| **Prefix, rarest-first** | | **1.01%** (34 points behind) |
+
+Same bytes on disk, an order of magnitude more reachable. This is why the seek
+tester reports two separate numbers — `prefix_available` and, for a given
+offset, `available_bytes` to the next hole. Reporting one frontier was the
+first version of the tester, and it called a byte at 99% "inside the frontier"
+while the frontier was at 6%.
 
 ### Partial playback: proven 2026-10-02
 
@@ -1031,15 +1078,49 @@ gate answered 425 rather than fabricate bytes, and it reported
 
 The fix is `toggleFirstLastPiecePrio`, enabled from `select_files`, which pulls
 the trailing index down first: the full `moov` was present 28 seconds in, at
-34.5% progress.
+34.5% progress. `select_files` enables sequential download alongside it — see
+the section above for the measured effect.
 
-**Known bound.** This only helps when the video is the last file in the torrent,
-because "last piece" means the last piece of the whole torrent. Sintel works
-because `Sintel.mp4` spans pieces 0–986 of 987. A video that is a small file in
-the middle is unaffected and still needs a faststart/fMP4 asset or per-piece
-prioritisation from a lower-level engine. §18's note that qBittorrent "does not
-expose arbitrary piece-priority control" still stands — this is first/last
-priority, not arbitrary priority.
+**Known bound.** The index prioritisation only helps when the video is the last
+file in the torrent, because "last piece" means the last piece of the whole
+torrent. Sintel works because `Sintel.mp4` spans pieces 0–986 of 987. A video
+that is a small file in the middle is unaffected and still needs a
+faststart/fMP4 asset or per-piece prioritisation from a lower-level engine.
+§18's note that qBittorrent "does not expose arbitrary piece-priority control"
+still stands — this is first/last priority, not arbitrary priority, and the
+probing above confirms there is no per-piece endpoint to fall back on.
+
+### New: the console seek tester
+
+`GET /tasks/{id}/files/{file_index}/frontier?at=<byte>` reports what is on disk
+for a file, in bytes, plus the current `seq_dl` flag. The byte arithmetic lives
+on the server, not in the console, because it is the same arithmetic
+`stream_manager._await_available` uses and the two must not drift — a test drives
+both from one fixture and asserts they agree.
+
+The console's seek tester probes an arbitrary offset (or a time like `90s`) and
+reports the HTTP status, byte count, `X-Magneto-Truncated`, content-range, and
+the first 16 bytes. It distinguishes four outcomes, and three of them are
+correct behaviour rather than failure:
+
+- **206, full range** — on disk.
+- **206, clamped** — straddles a hole; `Content-Length` matches what was sent.
+- **425** — nothing here is on disk. The design working as intended.
+- **DEFECT** — served bytes the engine cannot verify. Never seen in practice.
+
+It re-reads availability *after* the response, because the gate polls piece
+states during its wait and a request that sat 8 seconds will have had its piece
+arrive while the tester held a stale snapshot. Judging against the pre-request
+snapshot reports that healthy wait as a DEFECT — a false alarm on the one tool
+whose job is to raise alarms. Two earlier versions of this check did exactly
+that, and both are now regression-tested by driving the real function against
+stubbed `fetch`.
+
+**The sparse-hole detector ignores offset 0.** Every MP4 opens
+`00 00 00 20 'ftyp'`, where the leading zeros are a box length, not a hole; the
+zero-run scan in `stream_manager` makes the same exclusion (`and index > 0`).
+An earlier version of the check did not, and reported Sintel's own file header
+as corruption.
 
 ---
 
@@ -1133,3 +1214,11 @@ The fundamental loop is:
 If that loop works reliably, Magneto has a foundation.
 
 If it does not, stop feature development and change the torrent-engine strategy before adding more features.
+
+**Status 2026-10-02: the loop breaks at `SEEK → NEW PIECES`, and that is now
+measured rather than assumed.** Every other arrow is proven — partial playback
+starts at 8.6% and runs in real time. The seek arrow fails because the gate can
+only *poll* `pieceStates`; there is no Web API call to ask for a specific piece
+(§33). This is precisely the "change the torrent-engine strategy" condition
+above, so it is the trigger for `LibtorrentEngine`, not a reason to keep
+building features.

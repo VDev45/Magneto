@@ -43,7 +43,9 @@ class ContainerIndexPriorityTests(unittest.TestCase):
         def fake_get(path, **params):
             self.gets.append(path)
             if path.endswith("torrents/info"):
-                return info if info is not None else [{"hash": "abc123", "f_l_piece_prio": False}]
+                return info if info is not None else [
+                    {"hash": "abc123", "f_l_piece_prio": False, "seq_dl": False}
+                ]
             raise AssertionError("unexpected GET " + path)
 
         def fake_post(path, **data):
@@ -145,6 +147,144 @@ class ContainerIndexPriorityTests(unittest.TestCase):
         task.torrent_hash = None
         with self.assertRaises(RuntimeError):
             manager.select_files(task, {0})
+
+
+class SequentialDownloadTests(unittest.TestCase):
+    """Sequential download is the biggest lever on how much plays early.
+
+    libtorrent defaults to rarest-first, so complete pieces scatter and the
+    playable prefix -- the unbroken run from byte 0, the only part a player
+    starting at the beginning can reach -- stalls far behind overall progress.
+    Measured on Sintel at 35% complete: 333 of 987 pieces in 217 separate
+    runs, with the prefix at 1-2%. With sequential on, the prefix tracked
+    progress (9.1%, 13.2%, 15.4%, 16.3% as the same download advanced).
+
+    Same bytes on disk, an order of magnitude more of them reachable.
+    """
+
+    def build(self, *, info, post_error=None, video=True):
+        manager = TorrentManager("http://qbit", "admin", "pw")
+        task = Task(id="t1", magnet="magnet:?x")
+        task.torrent_hash = "abc123"
+        names = ["Sintel.mp4", "a.srt"] if video else ["a.srt", "b.srt"]
+        task.files = [
+            TorrentFile(index=i, name=names[i], size=1000, progress=0.0,
+                        priority=1, path=names[i])
+            for i in range(len(names))
+        ]
+        self.posts: list[tuple[str, dict]] = []
+
+        def fake_get(path, **params):
+            if path.endswith("torrents/info"):
+                return info
+            raise AssertionError("unexpected GET " + path)
+
+        def fake_post(path, **data):
+            self.posts.append((path, data))
+            if post_error and path.endswith(post_error[0]):
+                raise HTTPError(post_error[1])
+            return ""
+
+        manager._get = fake_get
+        manager._post = fake_post
+        return manager, task
+
+    def off(self, **extra):
+        base = {"hash": "abc123", "f_l_piece_prio": True, "seq_dl": False}
+        base.update(extra)
+        return [base]
+
+    def toggles(self):
+        return [p for p in self.posts if "toggle" in p[0]]
+
+    def test_sequential_download_is_enabled_on_select(self):
+        manager, task = self.build(info=self.off())
+        manager.select_files(task, {0})
+        self.assertTrue(
+            any(p[0].endswith("toggleSequentialDownload") for p in self.posts),
+            "sequential download was never enabled",
+        )
+
+    def test_never_posts_the_toggle_when_already_on(self):
+        """toggleSequentialDownload is a TOGGLE, not a setter. Posting it to a
+        torrent that already has it on turns it back off -- which would silently
+        undo this exact optimisation and stall the prefix with no visible
+        reason."""
+        manager, task = self.build(info=self.off(seq_dl=True))
+        manager.select_files(task, {0})
+        self.assertFalse(
+            any(p[0].endswith("toggleSequentialDownload") for p in self.posts),
+            "re-posted the toggle to an already-sequential torrent",
+        )
+
+    def test_reads_the_5x_field_name(self):
+        """5.x calls it seq_dl; 4.x called it sequential_download. Reading the
+        old name yields None, reads as off, and re-posts the toggle."""
+        manager, task = self.build(
+            info=[{"hash": "abc123", "f_l_piece_prio": True,
+                   "seq_dl": True, "sequential_download": False}]
+        )
+        manager.select_files(task, {0})
+        self.assertFalse(
+            any(p[0].endswith("toggleSequentialDownload") for p in self.posts),
+            "used the 4.x field name; the toggle got re-posted",
+        )
+
+    def test_a_missing_flag_reads_as_off(self):
+        """Some builds omit seq_dl entirely. That has to post the toggle, not
+        raise -- and definitely not read as 'on' and skip it."""
+        manager, task = self.build(
+            info=[{"hash": "abc123", "f_l_piece_prio": True}]
+        )
+        manager.select_files(task, {0})
+        self.assertTrue(
+            any(p[0].endswith("toggleSequentialDownload") for p in self.posts)
+        )
+
+    def test_not_applied_when_only_subtitles_are_selected(self):
+        """A subtitle has no index to chase and no timeline to play, and
+        prioritising pieces for one slows the file the user wants."""
+        manager, task = self.build(info=self.off(), video=False)
+        manager.select_files(task, {0})
+        self.assertEqual(self.toggles(), [])
+
+    def test_the_index_toggle_is_also_idempotent(self):
+        """Both toggles now go through the same read-before-post helper, so
+        both have to hold when already on."""
+        manager, task = self.build(
+            info=self.off(seq_dl=True, f_l_piece_prio=True)
+        )
+        manager.select_files(task, {0})
+        self.assertEqual(self.toggles(), [])
+
+    def test_a_failing_sequential_toggle_does_not_lose_the_selection(self):
+        manager, task = self.build(
+            info=self.off(), post_error=("toggleSequentialDownload", "404")
+        )
+        manager.select_files(task, {0})
+        self.assertEqual(task.selected_files, {0})
+        self.assertTrue(
+            any(p[0].endswith("filePrio") for p in self.posts),
+            "file priorities were never applied",
+        )
+
+    def test_a_failing_info_query_does_not_lose_the_selection(self):
+        manager, task = self.build(
+            info=[], post_error=("toggleSequentialDownload", "500")
+        )
+        manager.select_files(task, {0})
+        self.assertEqual(task.selected_files, {0})
+
+    def test_a_missing_torrent_entry_is_not_treated_as_on(self):
+        """info returns rows for other torrents when the hash filter is
+        ignored. Not finding our own row must fall through to posting."""
+        manager, task = self.build(
+            info=[{"hash": "other", "f_l_piece_prio": True, "seq_dl": True}]
+        )
+        manager.select_files(task, {0})
+        self.assertTrue(
+            any(p[0].endswith("toggleSequentialDownload") for p in self.posts)
+        )
 
 
 if __name__ == "__main__":

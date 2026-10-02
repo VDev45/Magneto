@@ -160,8 +160,8 @@ The fix is in `TorrentManager._prioritize_container_index`, called from `select_
 
 Three traps, all of which fail silently:
 
-- **`toggleFirstLastPiecePrio` is a TOGGLE, not a setter.** Posting it twice turns the setting back off. `_first_last_prio()` must read the current value first and skip the call when already on. Verified against the 5.0 WebUI API docs, not inferred.
-- **qBittorrent 5.x renamed the field to `f_l_piece_prio`.** 4.x called it `first_last_prio_pieces`; reading the old name yields `None`, which reads as "off" and would toggle an already-enabled torrent back off. Same family as `num_pieces` → `pieces_num` and `completed` → `pieces_have`.
+- **`toggleFirstLastPiecePrio` is a TOGGLE, not a setter.** Posting it twice turns the setting back off. `_ensure_toggle` reads the current value first and skips the call when already on. Verified against the 5.0 WebUI API docs, not inferred. `toggleSequentialDownload` has the same trap and goes through the same helper.
+- **qBittorrent 5.x renamed the fields to short forms.** 4.x called them `first_last_prio_pieces` and `sequential_download`; 5.x reports `f_l_piece_prio` and `seq_dl`. Reading an old name yields `None`, which reads as "off" and would toggle an already-enabled torrent back off. Same family as `num_pieces` → `pieces_num` and `completed` → `pieces_have`.
 - **It only helps when the video is the last file in the torrent.** "Last piece" means the last piece of the whole torrent. It worked on Sintel only because `Sintel.mp4` spans pieces 0–986 of 987. For a video that is a small file in the middle, the trailing pieces belong to a different file and this does nothing. That case needs a faststart/fMP4 asset or per-piece prioritisation from a lower-level engine — this is a real bound, not a general solution.
 
 Only applied when a video file is selected: a subtitle has no index to chase, and prioritising its pieces would slow down the file the user actually wants. Engine failures are swallowed — losing the optimisation must not lose the file selection; the fallback is the old behaviour.
@@ -174,6 +174,24 @@ Verify the box layout before blaming the gate:
 
 What is proven: bytes are never fabricated, ranges clamp to the verified frontier, 425 when nothing is available, and **playback from 8.6% of a partial download**.
 
+### Sequential download is the biggest lever on how much plays early
+
+`select_files` also enables `toggleSequentialDownload`. libtorrent defaults to rarest-first, so complete pieces scatter and the **playable prefix** — the unbroken run from byte 0, the only part a player starting at the beginning can reach — falls far behind overall progress. Measured on Sintel at 35.02% complete: 333 of 987 pieces in **217 separate runs**, prefix at **1.01%**. With sequential on, the prefix tracks progress (9.73% at 12.56% overall). Same bytes on disk, an order of magnitude more reachable.
+
+**There is no per-piece priority endpoint in the Web API.** Checked against the 5.0 docs and probed on a live 5.2.4: `setPiecePrio`, `piecePrio` and `setPiecePriority` all return `Endpoint does not exist`, while `increasePrio`/`topPrio` move *files*, not pieces. The only piece-related endpoints are `pieceStates` (read), `pieceHashes` (read) and `toggleFirstLastPiecePrio`. So `stream_manager` can only *poll* whether a piece has arrived — it can never *ask* for one. Consequence: **seeking into undownloaded bytes does not work and cannot be made to work through this API** (measured: `425` after the full 30 s `STREAM_PIECE_WAIT` at 50%, 90% and 98% of the file). Closing the `SEEK → NEW PIECES` arrow in PLAN.md §36 needs `LibtorrentEngine`.
+
+## The seek tester is a diagnostic, not a feature
+
+`GET /tasks/{id}/files/{file_index}/frontier?at=<byte>` reports what is on disk for a file in bytes: `prefix_available` (end of the unbroken run from byte 0 — exactly where `_await_available` clamps), `available_bytes` to the next hole for a given offset, and `seq_dl`. The arithmetic lives in `main.py` rather than the console because it is the same arithmetic the gate uses; `FrontierMatchesTheGateTests` drives both from one fixture and asserts they agree, so a divergence is a test failure rather than an afternoon of debugging.
+
+Report **two** numbers, never one. A single "frontier" lies about a scattered download — the first version of this endpoint reported a byte at 99% as "inside the frontier" while the frontier was at 6%.
+
+`ConsoleSeekVerdictTests` runs the real `seekProbeAt` in node against stubbed `fetch` and asserts on what it *reports*. Grepping the source is not enough here, and an earlier version of those tests proved it: they counted occurrences of `"/frontier?at="` and passed while the code judged every response against a **pre-request** snapshot, so a healthy 8-second wait reported `DEFECT`. The gate polls piece states *during* its wait, so availability must be re-read **after** the response.
+
+Two more traps, both of which made the tool cry wolf:
+
+- **A leading zero run at offset 0 is not a sparse hole.** Every MP4 opens `00 00 00 20 'ftyp'`, where the zeros are a box length. `stream_manager`'s zero-run scan makes the same exclusion (`and index > 0`); the detector must too, or it reports Sintel's own header as corruption.
+- **Never advise enabling sequential download when it is already on.** Hence `seq_dl` in the payload. An earlier version told a reader to turn on a setting they had just enabled.
 
 ## Repo hygiene
 

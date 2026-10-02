@@ -77,7 +77,7 @@ curl -X POST localhost:8000/tasks \
 
 For interactive testing there is a console that adds a UI on top of the same
 API. It serves everything `main.py` does, plus a task list, live piece states,
-a Range probe, and a player:
+a Range probe, a **seek tester**, and a player:
 
 ```bash
 cd experiments/stream-validation
@@ -109,6 +109,45 @@ The `<video>` element only proves a browser will play the head of the file;
 far-ahead seeking on a partial download needs VLC/MX Player, which is the
 actual gate (PLAN.md §23).
 
+### The seek tester
+
+Playback from a partial file is proven. **Seeking into undownloaded bytes is
+not**, and that is the last unproven arrow in PLAN.md §36. The seek tester turns
+"seeking feels broken" into a number: probe a byte offset (or a time like `90s`
+or `12:30`) and it reports what the server actually did — HTTP status, byte
+count, `X-Magneto-Truncated`, content-range, and the first 16 bytes — next to
+what the engine said was on disk at the time.
+
+Three of its four outcomes are correct behaviour, not failure:
+
+| | |
+|---|---|
+| `206`, full range | on disk |
+| `206`, clamped at a hole | the gate clamped rather than padding to `Content-Length` |
+| `425` after waiting | nothing here is on disk; it will not serve sparse zeros |
+| `DEFECT` | bytes served the engine cannot verify — report it |
+
+Measured on a throttled Sintel: a probe inside the frontier returns `206`
+immediately; a probe 2 MB past it returns `206` after an 8–11 s wait, because the
+piece landed mid-request; a probe at 90–98% returns `425` after the full 30 s
+`STREAM_PIECE_WAIT`.
+
+That last row is the finding. **The gate waits but cannot ask** — it polls
+`pieceStates`, and the qBittorrent Web API has no per-piece priority endpoint at
+all (checked against the 5.0 docs and probed on a live 5.2.4: `setPiecePrio`,
+`piecePrio` and `setPiecePriority` all 404, and `increasePrio`/`topPrio` move
+*files*, not pieces). Closing the `SEEK → NEW PIECES` gap needs the
+`LibtorrentEngine` swap.
+
+Note there is no single "frontier". libtorrent selects rarest-first, so complete
+pieces scatter: at 35% complete on Sintel, 333 of 987 pieces sat in 217 separate
+runs and the **playable prefix** — the unbroken run from byte 0, which is all a
+player starting at the beginning can reach — was at **1.01%**. `select_files`
+therefore also enables `toggleSequentialDownload`, after which the prefix tracks
+overall progress (9.73% at 12.56% overall). Same bytes on disk, an order of
+magnitude more reachable. This is why the tester reports `prefix` and
+"askable from here" as separate numbers.
+
 There is also a manual workflow at `.github/workflows/validate.yml`
 (`Actions → Stream validation → Run workflow`) that stands the whole thing up
 on a GitHub-hosted runner and publishes it through a temporary Cloudflare
@@ -128,6 +167,15 @@ can add magnets until the job ends.
 > `toggleFirstLastPiecePrio`, which fetches the trailing index first. Verified
 > at 250 KB/s: the whole `moov` landed 28s in at 34.5% progress, and playback
 > then started at **8.6%** of the download — `1024x436`, real time, no error.
+>
+> It also enables `toggleSequentialDownload`, so the playable prefix advances in
+> order instead of scattering — see the seek tester above for the measurement.
+>
+> Both are **toggles, not setters**. Posting either endpoint twice turns it back
+> off, which silently undoes the optimisation and stalls the download with no
+> visible reason, so `TorrentManager._ensure_toggle` reads the current value
+> first and posts only when it is off. qBittorrent 5.x also renamed the fields:
+> `first_last_prio_pieces` → `f_l_piece_prio`, `sequential_download` → `seq_dl`.
 >
 > This only helps when the video is the **last file in the torrent**, because
 > "last piece" means the last piece of the whole torrent. Sintel works because

@@ -252,25 +252,44 @@ class TorrentManager:
         chase, and prioritising pieces for one slows down the file the user
         actually wants to watch.
 
-        Known limit: this reaches the index only when the video sits at the end
-        of the torrent, because "last piece" means the last piece of the whole
-        torrent. For a video that is a small file in the middle, the trailing
-        pieces belong to some other file and this does nothing -- that case
-        needs a faststart/fMP4 asset or per-piece prioritisation from a
-        lower-level engine.
+        It also enables sequential download, which is the single biggest
+        lever on how much is playable early. libtorrent defaults to
+        rarest-first, so complete pieces scatter: measured on Sintel, 333 of
+        987 pieces were complete at 35% overall progress, spread over 217
+        separate runs, and the *playable prefix* -- the unbroken run from byte
+        0, which is all a player starting at the beginning can reach -- sat
+        at 1-2%. With sequential download on, the prefix tracked overall
+        progress directly (9.1%, 13.2%, 15.4%, 16.3% as the same download
+        advanced). Same bytes on disk, an order of magnitude more of it
+        reachable.
+
+        Both are independent toggles and both must be read before being
+        posted, for the same reason: posting twice turns them back off.
+
+        Known limit: the index priority reaches the index only when the video
+        sits at the end of the torrent, because "last piece" means the last
+        piece of the whole torrent. For a video that is a small file in the
+        middle, the trailing pieces belong to some other file and this does
+        nothing -- that case needs a faststart/fMP4 asset or per-piece
+        prioritisation from a lower-level engine.
+
+        The Web API has no per-piece priority endpoint at all (checked against
+        the 5.0 docs and a live 5.2.4: only ``pieceStates`` and
+        ``pieceHashes`` read, plus ``toggleFirstLastPiecePrio``). So the gate
+        can only wait for pieces the engine happens to be fetching; it cannot
+        ask for the ones a seek needs. Closing that gap needs the
+        ``LibtorrentEngine`` swap.
         """
         if not any(f.is_video for f in task.files if f.index in selected):
             return
 
         try:
-            if self._first_last_prio(task):
-                return
-            # This endpoint is a TOGGLE, not a setter. Posting it twice turns
-            # the setting back off, so the current value has to be read first.
-            # (Confirmed against the 5.0 WebUI API docs.)
-            self._post(
-                "/api/v2/torrents/toggleFirstLastPiecePrio",
-                hashes=task.torrent_hash,
+            self._ensure_toggle(
+                task, "/api/v2/torrents/toggleFirstLastPiecePrio",
+                "f_l_piece_prio",
+            )
+            self._ensure_toggle(
+                task, "/api/v2/torrents/toggleSequentialDownload", "seq_dl",
             )
         except HTTPError:
             # A missing endpoint or a rejected call must not fail file
@@ -278,20 +297,60 @@ class TorrentManager:
             # until the download completes.
             pass
 
-    def _first_last_prio(self, task: Task) -> bool:
-        """Whether first/last piece priority is already on for this torrent.
+    def _ensure_toggle(
+        self, task: Task, endpoint: str, field: str
+    ) -> None:
+        """Post ``endpoint`` only if ``field`` is currently off.
 
-        qBittorrent 5.x renamed this field ``f_l_piece_prio``; it was
-        ``first_last_prio_pieces`` in 4.x, and reading the old name yields
-        ``None``, which reads as "off" and would toggle an already-enabled
-        torrent back off.
+        Every ``toggle*`` endpoint is a TOGGLE, not a setter, so an
+        unconditional post turns an already-set option back off. Reading first
+        is the only way to make these idempotent -- and getting it wrong
+        silently undoes a setting an earlier call turned on, which is exactly
+        the class of bug that leaves a download stalled for no visible reason.
+
+        ``field`` is the 5.x name in ``torrents/info``. qBittorrent renamed
+        these: ``first_last_prio_pieces`` became ``f_l_piece_prio`` and
+        ``sequential_download`` became ``seq_dl``. Reading a 4.x name yields
+        ``None``, which reads as "off" and re-posts the toggle, turning it
+        back off. ``torrents/info`` also reports ``seq_dl`` as absent on some
+        builds, which must read as "off" rather than raise.
         """
         entries = self._get(
             "/api/v2/torrents/info", hashes=task.torrent_hash
         )
         for entry in entries:
             if entry.get("hash") == task.torrent_hash:
-                return bool(entry.get("f_l_piece_prio"))
+                if entry.get(field):
+                    return
+                break
+        self._post(endpoint, hashes=task.torrent_hash)
+
+    def _first_last_prio(self, task: Task) -> bool:
+        """Whether first/last piece priority is already on for this torrent.
+
+        Retained because the index tests assert on it directly. The toggle
+        itself now goes through :meth:`_ensure_toggle`.
+        """
+        return self._flag(task, "f_l_piece_prio")
+
+    def sequential_download(self, task: Task) -> bool:
+        """Whether the torrent is downloading in piece order.
+
+        5.x reports this as ``seq_dl`` (4.x: ``sequential_download``), the
+        same rename family as ``f_l_piece_prio``. Returns False when the
+        torrent is unknown, so a caller cannot mistake "no such torrent" for
+        "sequential, nothing to do".
+        """
+        return self._flag(task, "seq_dl")
+
+    def _flag(self, task: Task, field: str) -> bool:
+        """Read a boolean torrent flag from ``torrents/info`` by its 5.x name."""
+        entries = self._get(
+            "/api/v2/torrents/info", hashes=task.torrent_hash
+        )
+        for entry in entries:
+            if entry.get("hash") == task.torrent_hash:
+                return bool(entry.get(field))
         return False
 
     def start(self, task: Task) -> None:
