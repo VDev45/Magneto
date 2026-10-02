@@ -258,6 +258,15 @@ def main() -> int:
         default=120,
         help="seconds to wait for the first bytes to land",
     )
+    parser.add_argument(
+        "--allow-no-task",
+        action="store_true",
+        help=(
+            "succeed when the console has no task yet. The workflow no longer "
+            "ships a default magnet, so an empty console is the normal state "
+            "until someone pastes one."
+        ),
+    )
     args = parser.parse_args()
     base = args.base_url.rstrip("/")
 
@@ -270,6 +279,14 @@ def main() -> int:
     print("-> state and files")
     task = check_state_endpoint(base, report)
     if task is None:
+        if args.allow_no_task:
+            print(report.render())
+            print(
+                "\nNo task yet -- that is expected with no default magnet. "
+                "The console and its state endpoint are reachable; paste a "
+                "magnet in the browser to exercise the Range layer."
+            )
+            return 1 if report.failed else 0
         print(report.render())
         print("\n::error::Cannot continue: no task with files listed.")
         return 1
