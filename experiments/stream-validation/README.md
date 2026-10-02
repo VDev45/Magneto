@@ -2,7 +2,7 @@
 
 This experiment validates the core technical path before Magneto grows into a Telegram bot:
 
-`magnet → qBittorrent → partial file → HTTP Range → VLC/MX Player`
+`Task → TorrentManager → qBittorrent → FileManager → StreamManager → HTTP Range → VLC/MX Player`
 
 ## What this proves
 
@@ -55,7 +55,7 @@ export QBIT_PASSWORD='your-password'
 ```python experiments/stream-validation/app.py
 ```
 
-7. Open the reported stream URL in VLC or MX Player.
+7. Use `POST /tasks/{task_id}/select` to select a video file, then open `/stream/{task_id}/{file_index}` in VLC/MX Player.
 
 ## Environment
 
@@ -80,3 +80,12 @@ export QBIT_PASSWORD='your-password'
 - [ ] First-frame latency recorded
 - [ ] qBittorrent-only approach accepted or rejected based on evidence
 
+
+## Lifecycle endpoints
+
+- `POST /tasks` — create a task and resolve metadata.
+- `GET /tasks/{task_id}` — refresh task/file state.
+- `GET /tasks/{task_id}/state` — inspect piece states.
+- `POST /tasks/{task_id}/select` — select files and start or queue the task.
+- `POST /tasks/{task_id}/cancel` — stop a task.
+- `DELETE /tasks/{task_id}` — remove the torrent from qBittorrent.
