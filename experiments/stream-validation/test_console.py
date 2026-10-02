@@ -53,8 +53,8 @@ class ConsoleHtmlTests(unittest.TestCase):
         html = console.console()
         self.assertIn("<!doctype html>", html)
         self.assertIn('<script src="/console.js"></script>', html)
-        # The probe is the thing that proves 206 Partial Content works.
-        self.assertIn("206 Partial Content OK", html)
+        self.assertIn('id="probeOut"', html)
+        self.assertIn("206 = Partial Content", html)
 
     def test_console_js_contains_api_poll(self):
         js = console.console_js()
