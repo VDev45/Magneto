@@ -127,15 +127,46 @@ jobs:
       - name: Start qBittorrent
         run: |
           set -euo pipefail
+          # Docker Hub caps anonymous pulls per source IP, and hosted runners
+          # share one IP across every user of Actions, so the budget is
+          # routinely already spent before this job starts. The failure looks
+          # like a network error: "error pulling image configuration: download
+          # failed after attempts=1: toomanyrequests ... allowed: 44000/minute".
+          # The window is per-minute, so backing off clears it -- do not treat
+          # one failure as fatal.
+          pulled=0
+          for attempt in $(seq 1 8); do
+            if docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" pull -q; then
+              pulled=1
+              break
+            fi
+            echo "::warning::image pull throttled by Docker Hub (attempt $attempt/8)"
+            sleep $((attempt * 20))
+          done
+          if [ "$pulled" -ne 1 ]; then
+            echo "::error::Could not pull the qBittorrent image after 8 attempts."
+            echo "This is Docker Hub's anonymous rate limit, not a config error."
+            echo "Re-run the workflow, or repoint the image at a mirror."
+            exit 1
+          fi
+
           docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" up -d
           echo "waiting for WebUI..."
+          up=0
           for i in $(seq 1 60); do
             if curl -sf -o /dev/null http://127.0.0.1:8080/; then
               echo "qBittorrent WebUI up after ${i}s"
+              up=1
               break
             fi
             sleep 1
           done
+          if [ "$up" -ne 1 ]; then
+            echo "::error::WebUI never answered on 8080."
+            docker ps -a --filter name=magneto-qbittorrent
+            docker logs --tail 40 magneto-qbittorrent || true
+            exit 1
+          fi
           docker ps --filter name=magneto-qbittorrent
 
       - name: Resolve qBittorrent password
