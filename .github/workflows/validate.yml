@@ -51,13 +51,47 @@ jobs:
           pkill -f "[u]vicorn main:app" || true
           sleep 2
 
-      - name: Check runner prerequisites
+      - name: Ensure Docker is available
         run: |
           set -euo pipefail
           command -v docker
-          docker info >/dev/null   # fails loudly if the daemon is not running
+          command -v dockerd
+
+          if ! docker info >/dev/null 2>&1; then
+            echo "::notice::Docker daemon is down, attempting to start it."
+            # Works only if this runner has passwordless sudo for the service.
+            # Without it Actions cannot answer a sudo prompt -- the step would
+            # hang rather than fail, so try it with a short non-interactive
+            # timeout instead.
+            if timeout 20 sudo -n systemctl start docker 2>/dev/null; then
+              echo "started via systemctl"
+            else
+              echo "::error::Could not start Docker automatically."
+              echo "Run this once in your own terminal, then re-run the workflow:"
+              echo "  sudo systemctl enable --now docker"
+              exit 1
+            fi
+          fi
+
+          # The socket can lag a moment behind the service on systemd.
+          for i in $(seq 1 15); do
+            if docker info >/dev/null 2>&1; then
+              echo "Docker ready after ${i}s"
+              docker info --format 'Server {{.ServerVersion}} / {{.Driver}} / cgroup {{.CgroupDriver}}'
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Docker did not become ready in 15s"
+          exit 1
+
+      - name: Check runner prerequisites
+        run: |
+          set -euo pipefail
           command -v python3
           python3 -c 'import sys; assert sys.version_info >= (3,11), sys.version'
+          python3 --version
+          docker compose version
 
       - uses: actions/checkout@v4
 
