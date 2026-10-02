@@ -95,9 +95,17 @@ def check_console_ui(base: str, report: Report) -> None:
     )
 
 
-def check_state_endpoint(base: str, report: Report) -> dict[str, Any] | None:
+def check_state_endpoint(
+    base: str, report: Report, allow_no_task: bool = False
+) -> dict[str, Any] | None:
     """/console/state is what the page polls; it must list files for the row
-    table and the file checkboxes to have anything to render."""
+    table and the file checkboxes to have anything to render.
+
+    ``allow_no_task`` downgrades "no tasks" from FAIL to WARN. It has to be
+    applied *here*, at the point the row is recorded: adding it as a FAIL and
+    then excusing it in main() leaves ``report.failed`` True, so the flag looks
+    like it works while still failing the job. That shipped once.
+    """
     response = requests.get(f"{base}/console/state", timeout=15)
     if response.status_code != 200:
         report.add("GET /console/state", False, f"HTTP {response.status_code}")
@@ -106,7 +114,10 @@ def check_state_endpoint(base: str, report: Report) -> dict[str, Any] | None:
 
     payload = response.json()
     tasks = payload.get("tasks") or []
-    report.add("task listed", bool(tasks), f"{len(tasks)} task(s)")
+    if not tasks and allow_no_task:
+        report.warn("task listed", "0 task(s) -- allowed, nothing to check yet")
+    else:
+        report.add("task listed", bool(tasks), f"{len(tasks)} task(s)")
     if not tasks:
         return None
 
@@ -277,19 +288,22 @@ def main() -> int:
     check_console_ui(base, report)
 
     print("-> state and files")
-    task = check_state_endpoint(base, report)
+    task = check_state_endpoint(base, report, allow_no_task=args.allow_no_task)
     if task is None:
-        if args.allow_no_task:
-            print(report.render())
-            print(
-                "\nNo task yet -- that is expected with no default magnet. "
-                "The console and its state endpoint are reachable; paste a "
-                "magnet in the browser to exercise the Range layer."
-            )
-            return 1 if report.failed else 0
         print(report.render())
-        print("\n::error::Cannot continue: no task with files listed.")
-        return 1
+        if args.allow_no_task:
+            # The absence of a task was already downgraded to WARN above, so
+            # report.failed reflects only real problems. It still fails if the
+            # console itself is broken -- an empty console and a dead console
+            # are very different states and must not look the same.
+            print(
+                "\nNo task yet -- expected, since the workflow ships no default "
+                "magnet. The console and its state endpoint are reachable; "
+                "paste a magnet in the browser to exercise the Range layer."
+            )
+        else:
+            print("\n::error::Cannot continue: no task with files listed.")
+        return 1 if report.failed else 0
 
     print("-> selection and download")
     if not select_video(base, task, report):
