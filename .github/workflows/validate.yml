@@ -104,6 +104,7 @@ jobs:
           python3 -c 'import sys; assert sys.version_info >= (3,11), sys.version'
           python3 --version
           docker compose version
+          command -v jq
 
       - uses: actions/checkout@v4
 
@@ -152,6 +153,10 @@ jobs:
             exit 1
           fi
 
+          echo "::group::qBittorrent container status"
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" ps
+          echo "::endgroup::"
+          echo "Starting qBittorrent..."
           docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" up -d
           echo "waiting for WebUI..."
           up=0
@@ -169,7 +174,10 @@ jobs:
             docker logs --tail 40 magneto-qbittorrent || true
             exit 1
           fi
+          echo "::group::qBittorrent startup diagnostics"
           docker ps --filter name=magneto-qbittorrent
+          docker inspect --format 'image={{.Config.Image}} status={{.State.Status}} started={{.State.StartedAt}}' magneto-qbittorrent
+          echo "::endgroup::"
 
       - name: Resolve qBittorrent password
         id: qbit
@@ -302,7 +310,8 @@ jobs:
           MAGNET_VALUE: ${{ steps.magnet.outputs.value }}
         run: |
           set -euo pipefail
-          echo "Submitting magnet -- resolves metadata, does not start downloading."
+          echo "[$(date -Is)] Submitting magnet -- resolves metadata, does not start downloading."
+          echo "Magnet length: ${#MAGNET_VALUE} characters"
           # Keep the magnet in an environment variable instead of interpolating
           # it into shell/Python source. Tracker URLs and display names are
           # untrusted text and may contain shell-significant characters.
@@ -324,6 +333,9 @@ jobs:
           }
           echo
           echo "task.json written to $RUNNER_TEMP/task.json"
+          echo "::group::Created task"
+          jq '.{id, hash, name, state}' "$RUNNER_TEMP/task.json"
+          echo "::endgroup::"
       - name: Smoke test the console UI and Range layer
         run: |
           set -uo pipefail
@@ -387,26 +399,66 @@ jobs:
       - name: Hold open for manual testing
         run: |
           set -euo pipefail
-          echo "Console on port ${{ inputs.port }} for ${{ inputs.hold_minutes }} minutes."
-          echo "Cancel this job when you are finished."
+          task_id=$(jq -r '.id // empty' "$RUNNER_TEMP/task.json")
+          [ -n "$task_id" ] || { echo "::error::No task ID found"; exit 1; }
+          echo "Console: ${{ steps.tunnel.outputs.url }}/console"
+          echo "Task:    $task_id"
+          echo "Heartbeat every 15s: console + task + pieces + qBittorrent"
+
           deadline=$(( SECONDS + ${{ inputs.hold_minutes }} * 60 ))
+          heartbeat=0
           while [ $SECONDS -lt $deadline ]; do
-            if ! curl -sf -o /dev/null "http://127.0.0.1:${{ inputs.port }}/console"; then
-              echo "::warning::console stopped responding"
-              tail -40 "$RUNNER_TEMP/console.log" || true
-            fi
+            heartbeat=$((heartbeat + 1))
+            now=$(date -Is)
+            console_code=$(curl -s -o /dev/null -m 5 -w "%{http_code}" "http://127.0.0.1:${{ inputs.port }}/console" || true)
+            task_json=$(curl -fsS -m 10 "http://127.0.0.1:${{ inputs.port }}/tasks/$task_id" || true)
+            state_json=$(curl -fsS -m 10 "http://127.0.0.1:${{ inputs.port }}/tasks/$task_id/state" || true)
+            progress=$(printf "%s" "$task_json" | jq -r ".progress // 0" 2>/dev/null || echo 0)
+            state=$(printf "%s" "$task_json" | jq -r ".state // \"unknown\"" 2>/dev/null || echo unknown)
+            name=$(printf "%s" "$task_json" | jq -r ".name // \"unknown\"" 2>/dev/null || echo unknown)
+            downloaded=$(printf "%s" "$state_json" | jq -r ".piece_states.downloaded // 0" 2>/dev/null || echo 0)
+            downloading=$(printf "%s" "$state_json" | jq -r ".piece_states.downloading // 0" 2>/dev/null || echo 0)
+            pending=$(printf "%s" "$state_json" | jq -r ".piece_states.not_downloaded // 0" 2>/dev/null || echo 0)
+            total=$(printf "%s" "$state_json" | jq -r ".piece_states.total // 0" 2>/dev/null || echo 0)
+            printf "[%s] #%03d console=%s state=%s progress=%6.2f%% pieces=%s/%s downloaded, %s active, %s pending torrent=\"%s\"\n" "$now" "$heartbeat" "$console_code" "$state" "$(awk "BEGIN {print ($progress + 0) * 100}")" "$downloaded" "$total" "$downloading" "$pending" "$name"
+            printf "%s\n" "$task_json" > "$RUNNER_TEMP/last-task.json"
+            printf "%s\n" "$state_json" > "$RUNNER_TEMP/last-state.json"
             sleep 15
           done
-          echo "hold window elapsed"
-
+          echo "[$(date -Is)] Manual hold window elapsed."
       - name: Dump diagnostics
         if: always()
         run: |
-          echo "### console.log"; tail -60 "$RUNNER_TEMP/console.log" || true
-          echo "### task.json"; cat "$RUNNER_TEMP/task.json" 2>/dev/null || true
-          echo "### qBittorrent torrents"
-          docker exec magneto-qbittorrent sh -c 'ls -la /downloads/*/ 2>/dev/null' || true
-
+          echo "::group::Final console log"
+          tail -120 "$RUNNER_TEMP/console.log" || true
+          echo "::endgroup::"
+          echo "::group::Final tunnel log"
+          tail -80 "$RUNNER_TEMP/tunnel.log" || true
+          echo "::endgroup::"
+          echo "::group::Final task state"
+          cat "$RUNNER_TEMP/task.json" "$RUNNER_TEMP/last-task.json" "$RUNNER_TEMP/last-state.json" 2>/dev/null || true
+          echo "::endgroup::"
+          echo "::group::qBittorrent diagnostics"
+          docker ps -a --filter name=magneto-qbittorrent
+          docker stats --no-stream magneto-qbittorrent 2>/dev/null || true
+          docker logs --tail 120 magneto-qbittorrent 2>&1 || true
+          echo "::endgroup::"
+          echo "::group::Files on disk"
+          find "$EXPERIMENT_DIR/downloads" -maxdepth 3 -type f -printf "%p | %s bytes\n" 2>/dev/null | head -100 || true
+          echo "::endgroup::"
+      - name: Upload validation diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: magneto-validation-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/console.log
+            ${{ runner.temp }}/tunnel.log
+            ${{ runner.temp }}/task.json
+            ${{ runner.temp }}/last-task.json
+            ${{ runner.temp }}/last-state.json
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Clean up
         if: always()
         run: |
