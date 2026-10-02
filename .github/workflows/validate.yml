@@ -41,7 +41,12 @@ env:
 
 jobs:
   validate:
-    runs-on: self-hosted
+    # Hosted, not self-hosted. The download must happen on GitHub's network,
+    # not on the maintainer's (deliberately slow) connection; the console is
+    # reached back through a tunnel instead. A self-hosted runner would put
+    # both back on the slow connection, which is what made the earlier
+    # runs indistinguishable from running locally.
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Fail fast on leftover state from a previous run
@@ -207,6 +212,46 @@ jobs:
           done
           echo "console failed to start:"; cat "$RUNNER_TEMP/console.log"; exit 1
 
+      - name: Expose the console through a tunnel
+        id: tunnel
+        run: |
+          set -euo pipefail
+          # A hosted runner has no inbound route, so a tunnel is the only way
+          # to reach the console. Quick tunnels need no account or token, which
+          # also means anyone holding the URL can drive the console -- see the
+          # warning in the job summary.
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/cloudflared" \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x "$RUNNER_TEMP/cloudflared"
+
+          "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate \
+            --url "http://127.0.0.1:${{ inputs.port }}" \
+            > "$RUNNER_TEMP/tunnel.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/tunnel.pid"
+
+          url=""
+          for i in $(seq 1 30); do
+            url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' \
+                   "$RUNNER_TEMP/tunnel.log" | head -1 || true)
+            [ -n "$url" ] && break
+            sleep 2
+          done
+          if [ -z "$url" ]; then
+            echo "::error::Tunnel never published a URL:"
+            cat "$RUNNER_TEMP/tunnel.log"
+            exit 1
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Console: $url/console"
+
+          # Prove the tunnel actually forwards, rather than trusting the URL.
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$url/console")
+          echo "tunnel self-check: GET /console -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::Tunnel is up but not forwarding to the console."
+            exit 1
+          fi
+
       - name: Start the magnet
         env:
           QBIT_PASSWORD: ${{ steps.qbit.outputs.password }}
@@ -264,10 +309,17 @@ jobs:
             echo "| qBittorrent password source | ${{ steps.qbit.outputs.source }} |"
             echo "| Magnet | \`${{ steps.magnet.outputs.value }}\` |"
             echo
-            echo "### Port forward"
-            echo '```bash'
-            echo "ssh -L ${{ inputs.port }}:localhost:${{ inputs.port }} <this-runner>"
-            echo '```'
+            echo "### Open the console"
+            echo
+            echo "[\`${{ steps.tunnel.outputs.url }}/console\`](${{ steps.tunnel.outputs.url }}/console)"
+            echo
+            echo "The tunnel exists because a GitHub-hosted runner has no inbound"
+            echo "route. The download runs on GitHub's network; the stream still has"
+            echo "to reach your browser, so playback is bounded by your own uplink."
+            echo
+            echo "> **No authentication.** Anyone with this URL can add magnets and"
+            echo "> stream content through this runner until the job ends. Cancel the"
+            echo "> run when you are done."
             echo
             echo "### What to check (PLAN.md §1)"
             echo "The smoke test already selected the video file for you, so the"
@@ -305,6 +357,10 @@ jobs:
       - name: Clean up
         if: always()
         run: |
+          # Tear the tunnel down first: once this stops, the public URL stops
+          # resolving, which is the point -- the URL must not outlive the job.
+          [ -f "$RUNNER_TEMP/tunnel.pid" ] && kill "$(cat "$RUNNER_TEMP/tunnel.pid")" 2>/dev/null || true
+          pkill -f "[c]loudflared tunnel" || true
           [ -f "$RUNNER_TEMP/console.pid" ] && kill "$(cat "$RUNNER_TEMP/console.pid")" 2>/dev/null || true
           pkill -f "[u]vicorn console:app" || true
           # No -v: preserves qbit-config/ and therefore the WebUI password.
