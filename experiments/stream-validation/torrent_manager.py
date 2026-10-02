@@ -48,6 +48,7 @@ class TorrentManager:
             urls=task.magnet,
             savepath=save_path,
             stopped="true",
+            tags=task.id,
         )
         if result.strip() not in {"Ok.", "Ok"}:
             raise RuntimeError(f"qBittorrent rejected magnet: {result}")
@@ -55,9 +56,8 @@ class TorrentManager:
     def wait_for_hash(self, task: Task, timeout: int = 60) -> None:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            torrents = self._get("/api/v2/torrents/info")
+            torrents = self._get("/api/v2/torrents/info", tag=task.id)
             if torrents:
-                # Isolated validation instance: the newest torrent is our task.
                 torrent = torrents[0]
                 task.torrent_hash = torrent["hash"]
                 task.name = torrent["name"]
@@ -132,4 +132,13 @@ class TorrentManager:
             raise RuntimeError("Task has no torrent hash")
         return self._get(
             "/api/v2/torrents/pieceStates", hash=task.torrent_hash
+        )
+
+    def remove(self, task: Task, delete_files: bool = False) -> None:
+        if not task.torrent_hash:
+            return
+        self._post(
+            "/api/v2/torrents/delete",
+            hashes=task.torrent_hash,
+            deleteFiles=str(delete_files).lower(),
         )
