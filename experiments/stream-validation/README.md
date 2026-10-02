@@ -33,23 +33,37 @@ source .venv/bin/activate
 pip install -r experiments/stream-validation/requirements.txt
 ```
 
-3. Set a test magnet:
+3. Get the qBittorrent WebUI password from the container log (qBittorrent may generate an initial password):
+
+```bash
+docker logs magneto-qbittorrent 2>&1 | grep -i password
+```
+
+4. Set a test magnet and credentials:
+
+```bash
+export MAGNET_URI='magnet:?xt=urn:btih:...'
+export QBIT_PASSWORD='your-password'
+```
+
+5. Start the validator:
 
 ```export MAGNET_URI='magnet:?xt=urn:btih:...'```
 
-4. Start the validator:
+6. Start the validator:
 
 ```python experiments/stream-validation/app.py
 ```
 
-5. Open the reported stream URL in VLC or MX Player.
+7. Open the reported stream URL in VLC or MX Player.
 
 ## Environment
 
 - `QBIT_URL` — default `http://127.0.0.1:8080`
 - `QBIT_USERNAME` — default `admin`
 - `QBIT_PASSWORD` — default `adminadmin`
-- `QBIT_SAVE_PATH` — default `/downloads`
+- `QBIT_REMOTE_SAVE_PATH` — qBittorrent container path, default `/downloads`
+- `LOCAL_SAVE_PATH` — host path mapped to that container path, default `./experiments/stream-validation/downloads`
 - `MAGNET_URI` — required
 
 ## Validation checklist
