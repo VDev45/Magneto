@@ -281,7 +281,7 @@ async function probe() {
   const head = [...r.headers.entries()].map(([k, v]) => k + ": " + v).join("\\n");
   $("probeOut").innerHTML =
     `<span class="${r.status === 206 ? "v" : "err"}">HTTP ${r.status} ${r.status === 206 ? "(206 Partial Content OK)" : "UNEXPECTED"}</span>\n` +
-    esc(head) + "\n\n" +
+    esc(head) + "\\n\\n" +
     "received: " + buf.byteLength + " bytes in " + ms + " ms\\n" +
     "first 16 bytes: " + [...new Uint8Array(buf).slice(0, 16)].map(b => b.toString(16).padStart(2, "0")).join(" ");
 }

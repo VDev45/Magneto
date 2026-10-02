@@ -95,6 +95,14 @@ qBittorrent never fetches metadata for a stopped magnet, so `/torrents/files` st
 
 The managers take a `Task`; `TaskManager.tasks` holds `TaskRecord` wrappers. Three endpoints in `main.py` used `tasks.tasks.get(task_id)` and passed the wrapper straight through, producing `AttributeError: 'TaskRecord' object has no attribute 'torrent_hash'`. Use `tasks.get(task_id)` (returns `Task`, raises `KeyError`) or unwrap `.task` deliberately.
 
+### The console's JavaScript lives inside a Python string
+
+`CONSOLE_HTML` in `console.py` is a plain (non-raw) triple-quoted string containing an inline `<script>`. So a `\n` written in the JS becomes a **real newline byte** before it reaches the browser.
+
+That shipped as `esc(head) + "\n\n" +`, i.e. a JS double-quoted string containing two raw newlines — `SyntaxError: Invalid or unexpected token`. Chrome discards the entire script, so the page rendered its HTML shell while `probe`, `refresh` and `copyVlc` were all `undefined`: no polling, no file table, no Range probe. Every HTTP test passed throughout, because the API was always fine — only the browser was dead.
+
+**Use `\\n` in that string for a JS escape.** The guard is `ConsoleScriptSyntaxTests`, which extracts the `<script>` body and runs `node --check` on it (skipped when node is absent; ubuntu-latest has it). Anything that renders HTML without executing JS needs that kind of real-parse test — asserting on substrings cannot catch it.
+
 ### Never serialise models with `__dict__`
 
 `TorrentFile.is_video` is a `@property`, so it is **not** in `__dict__`. Serialising files with `f.__dict__` produced JSON without `is_video`, and the console's Range probe (`files.find(f => f.is_video)`) then reported *"no video file selected"* for every torrent — while the server-side `is_video` check kept working, so `curl` tests all passed. Use `TorrentFile.to_dict()`; the field list there is deliberate. `smoke_test.py` asserts this shape, which is the only reason the probe bug got caught.

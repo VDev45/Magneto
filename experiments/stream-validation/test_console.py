@@ -1,3 +1,7 @@
+import os
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
@@ -60,6 +64,73 @@ class ConsoleHtmlTests(unittest.TestCase):
         js = console.console_js()
         self.assertIn("/console/state", js)
         self.assertIn("async function createTask", js)
+
+
+class ConsoleScriptSyntaxTests(unittest.TestCase):
+    """The console's JavaScript is served from console_js(), and it is
+    embedded in a *non-raw* Python string.
+
+    Every other test in this suite can pass while the page is completely
+    dead: a SyntaxError makes the browser discard the whole script, leaving
+    HTML that renders and an API that answers, with no polling, no file
+    table and no Range probe. That is exactly what shipped once -- a bare
+    "\\n\\n" in a non-raw Python string became two real newlines inside a JS
+    double-quoted literal.
+
+    Moving the script out of the HTML did not help on its own; the escaping
+    hazard is in the Python string, not the markup. So parse what is
+    actually served. Skipped where node is absent.
+    """
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_served_script_parses(self):
+        js = console.console_js()
+        self.assertTrue(js.strip(), "console_js() served an empty script")
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".js", delete=False
+        ) as handle:
+            handle.write(js)
+            path = handle.name
+        self.addCleanup(os.unlink, path)
+
+        result = subprocess.run(
+            ["node", "--check", path],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"served console.js does not parse:\n{result.stderr}",
+        )
+
+    def test_script_defines_the_probe(self):
+        """Guards against the script silently disappearing from the page."""
+        self.assertIn("async function probe()", console.console_js())
+
+    def test_script_is_no_raw_newline_in_a_quoted_literal(self):
+        """The specific defect, caught without needing node.
+
+        A double-quoted JS literal must not span a line break. If Python has
+        already turned an escape into a real newline, this trips.
+        """
+        js = console.console_js()
+        for number, line in enumerate(js.split("\n"), start=1):
+            quote = None
+            for char in line:
+                if char in "\"'":
+                    if quote is None:
+                        quote = char
+                    elif quote == char:
+                        quote = None
+                elif quote and char == "\\":
+                    continue
+            if quote is not None:
+                self.fail(
+                    f"line {number} leaves a {quote} literal open at end of "
+                    f"line -- a \\n escape was likely expanded by Python:\n"
+                    f"    {line}"
+                )
 
 
 if __name__ == "__main__":
