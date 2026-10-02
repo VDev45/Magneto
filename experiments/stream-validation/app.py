@@ -13,8 +13,11 @@ from fastapi.responses import StreamingResponse
 QBIT_URL = os.getenv("QBIT_URL", "http://127.0.0.1:8080").rstrip("/")
 QBIT_USERNAME = os.getenv("QBIT_USERNAME", "admin")
 QBIT_PASSWORD = os.getenv("QBIT_PASSWORD", "adminadmin")
-QBIT_SAVE_PATH = Path(os.getenv("QBIT_SAVE_PATH", "/downloads"))
+QBIT_REMOTE_SAVE_PATH = os.getenv("QBIT_REMOTE_SAVE_PATH", "/downloads")
+LOCAL_SAVE_PATH = Path(os.getenv("LOCAL_SAVE_PATH", "./experiments/stream-validation/downloads")).resolve()
 MAGNET_URI = os.getenv("MAGNET_URI")
+
+TORRENT_HASH: str | None = None
 
 app = FastAPI(title="Magneto Stream Validation")
 session = requests.Session()
@@ -45,23 +48,45 @@ def qbit_post(path: str, **data):
 
 
 def wait_for_torrent(timeout: int = 300) -> dict:
+    global TORRENT_HASH
+
     if not MAGNET_URI:
         raise RuntimeError("MAGNET_URI is required")
 
     qbit_login()
-    qbit_post(
-        "/api/v2/torrents/add",
-        urls=MAGNET_URI,
-        savepath=str(QBIT_SAVE_PATH),
-        sequentialDownload="true",
-        firstLastPiecePrio="true",
-    )
+
+    if TORRENT_HASH is None:
+        result = qbit_post(
+            "/api/v2/torrents/add",
+            urls=MAGNET_URI,
+            savepath=QBIT_REMOTE_SAVE_PATH,
+            sequentialDownload="true",
+            firstLastPiecePrio="true",
+        )
+        if result not in {"Ok.", "Ok"}:
+            raise RuntimeError(f"qBittorrent rejected magnet: {result}")
+
+        # Wait for the newly added magnet to appear and keep its hash.
+        add_deadline = time.monotonic() + 30
+        while time.monotonic() < add_deadline:
+            torrents = qbit_get("/api/v2/torrents/info")
+            if torrents:
+                TORRENT_HASH = torrents[0]["hash"]
+                break
+            time.sleep(1)
+
+        if TORRENT_HASH is None:
+            raise TimeoutError("qBittorrent accepted the magnet but no torrent appeared")
+
+    else:
+        torrents = qbit_get("/api/v2/torrents/info", hashes=TORRENT_HASH)
+        if not torrents:
+            raise RuntimeError(f"Torrent {TORRENT_HASH} is no longer present in qBittorrent")
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        torrents = qbit_get("/api/v2/torrents/info")
+            torrents = qbit_get("/api/v2/torrents/info", hashes=TORRENT_HASH)
         if torrents:
-            # The newest torrent is sufficient for this isolated experiment.
             torrent = torrents[0]
             files = qbit_get("/api/v2/torrents/files", hash=torrent["hash"])
             videos = [
@@ -83,8 +108,8 @@ def safe_local_path(torrent: dict) -> Path:
 
     # qBittorrent reports torrent-relative paths. Only allow a path rooted
     # below the configured download directory.
-    candidate = (QBIT_SAVE_PATH / file_name).resolve()
-    root = QBIT_SAVE_PATH.resolve()
+    candidate = (LOCAL_SAVE_PATH / file_name).resolve()
+    root = LOCAL_SAVE_PATH
 
     if root != candidate and root not in candidate.parents:
         raise RuntimeError("Resolved torrent path escapes download directory")
