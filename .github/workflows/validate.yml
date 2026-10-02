@@ -19,7 +19,7 @@ on:
       hold_minutes:
         description: "How long to stay up for manual testing."
         required: false
-        default: "45"
+        default: "350"
         type: string
 
 # GitHub-hosted by design. The runner is disposable and has no inbound route,
@@ -50,7 +50,7 @@ jobs:
     # both back on the slow connection, which is what made the earlier
     # runs indistinguishable from running locally.
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 360
     steps:
       - name: Fail fast on leftover state from a previous run
         run: |
