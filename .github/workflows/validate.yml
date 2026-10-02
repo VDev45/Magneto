@@ -158,6 +158,29 @@ jobs:
             echo "source=FALLBACK DEFAULT -- login will 401, set vars.QBIT_PASSWORD" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Verify qBittorrent login
+        env:
+          PW: ${{ steps.qbit.outputs.password }}
+        run: |
+          set -euo pipefail
+          # qBittorrent answers 200 "Ok." or 204 No Content on success and 403
+          # on bad credentials. Never trust a stored password blindly -- it
+          # goes stale whenever qBittorrent regenerates its config.
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Referer: http://127.0.0.1:8080/" \
+            -d "username=${QBIT_USERNAME:-admin}&password=$PW" \
+            http://127.0.0.1:8080/api/v2/auth/login)
+          echo "login HTTP $code (source: ${{ steps.qbit.outputs.source }})"
+          if [ "$code" = "403" ]; then
+            echo "::error::qBittorrent rejected the password -- the stored one is stale."
+            echo "Delete vars.QBIT_PASSWORD to fall back to scraping the log."
+            exit 1
+          fi
+          if [ "$code" != "200" ] && [ "$code" != "204" ]; then
+            echo "::error::Unexpected login response: HTTP $code"
+            exit 1
+          fi
+
       - name: Start the console API
         env:
           QBIT_PASSWORD: ${{ steps.qbit.outputs.password }}

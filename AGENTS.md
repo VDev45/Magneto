@@ -72,9 +72,28 @@ From the module docstrings and `PLAN.md`. These are deliberate boundaries, not i
 - **Never resolve a torrent-supplied path outside the storage root.** `FileManager.path_for` is the single place this is enforced. Don't "simplify" it into a bare `Path(torrent_file.path)`.
 - qBittorrent reports torrent-relative paths. `TorrentFile.name` is basename-only (for display/MIME), `TorrentFile.path` is the full relative path (for I/O). `FileManager` tries both `<root>/<path>` and `<root>/<task.name>/<path>` to handle single-file vs multi-file torrents.
 
+### qBittorrent 5.x changed these response shapes
+
+The adapter is written against the `lscr.io/linuxserver/qbittorrent:latest` image, which is 5.x. Four separate 4.x assumptions broke, each surfacing only as an opaque 500:
+
+- **Login returns `204 No Content`**, not `200 "Ok."`. Checking the body rejected every successful login.
+- **`torrents/add` returns JSON** `{"success_count": 1, ...}`, not `"Ok."`.
+- **`torrents/filePrio` renamed its parameters**: `hash` (not `hashes`) and `priority` (not `prio`). The 4.x spelling returns `400 Missing required parameters: hash, priority`.
+- **Adding a magnet that qBittorrent already holds returns `409 Conflict`.** `add_magnet` adopts it and re-tags it, because `wait_for_hash` looks up by tag and would otherwise time out.
+
+`info`, `files`, `pieceStates`, `start`, `stop`, and `delete` still accept the 4.x `hashes=` spelling.
+
+### Do NOT add magnets with `stopped="true"`
+
+qBittorrent never fetches metadata for a stopped magnet, so `/torrents/files` stays empty, file selection is impossible, and the task deadlocks with zero files. Added magnets must be left running; `select_files` priority `0` is what actually limits the download. `wait_for_hash` therefore waits for *files*, not just the hash — waiting on the hash alone returns with an empty list.
+
 ### Task ↔ torrent correlation is tag-based
 
-`TorrentManager.add_magnet` passes `tags=task.id`, and `wait_for_hash` resolves the hash by querying `/api/v2/torrents/info?tag=<task_id>` — *not* by hash, because the hash doesn't exist yet. Torrents are added `stopped="true"` so file selection can happen before any bytes move. Don't replace the tag mechanism with a list-scan like old `app.py` did; it's ambiguous with multiple tasks.
+`TorrentManager.add_magnet` passes `tags=task.id`, and `wait_for_hash` resolves the hash by querying `/api/v2/torrents/info?tag=<task_id>` — *not* by hash, because the hash doesn't exist yet. Don't replace the tag mechanism with a list-scan like old `app.py` did; it's ambiguous with multiple tasks.
+
+### `tasks.tasks` maps id → `TaskRecord`, not `Task`
+
+The managers take a `Task`; `TaskManager.tasks` holds `TaskRecord` wrappers. Three endpoints in `main.py` used `tasks.tasks.get(task_id)` and passed the wrapper straight through, producing `AttributeError: 'TaskRecord' object has no attribute 'torrent_hash'`. Use `tasks.get(task_id)` (returns `Task`, raises `KeyError`) or unwrap `.task` deliberately.
 
 ### Queue behaviour
 

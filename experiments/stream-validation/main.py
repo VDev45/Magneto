@@ -68,9 +68,11 @@ def select(task_id: str, body: dict):
 
 @app.get("/tasks/{task_id}")
 def get_task(task_id: str):
-    task = tasks.tasks.get(task_id)
-    if not task:
+    # tasks.tasks maps id -> TaskRecord; the managers take the Task itself.
+    record = tasks.tasks.get(task_id)
+    if not record:
         raise HTTPException(404, "Task not found")
+    task = record.task
     tasks.refresh(task)
     return {
         "id": task.id,
@@ -84,9 +86,10 @@ def get_task(task_id: str):
 
 @app.get("/tasks/{task_id}/state")
 def get_state(task_id: str):
-    task = tasks.tasks.get(task_id)
-    if not task:
+    record = tasks.tasks.get(task_id)
+    if not record:
         raise HTTPException(404, "Task not found")
+    task = record.task
     tasks.refresh(task)
     pieces = torrents.piece_states(task)
     return {
@@ -103,9 +106,10 @@ def get_state(task_id: str):
 
 @app.get("/stream/{task_id}/{file_index}")
 def stream(task_id: str, file_index: int, request: Request):
-    task = tasks.tasks.get(task_id)
-    if not task:
+    record = tasks.tasks.get(task_id)
+    if not record:
         raise HTTPException(404, "Task not found")
+    task = record.task
 
     torrent_file = next(
         (f for f in task.files if f.index == file_index),

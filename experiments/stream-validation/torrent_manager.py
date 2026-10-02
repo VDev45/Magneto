@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
+import re
 import time
 from typing import Any
 
 import requests
+from requests import HTTPError
 
 from models import Task, TaskState, TorrentFile
 
@@ -25,8 +30,13 @@ class TorrentManager:
             timeout=15,
         )
         response.raise_for_status()
-        if response.text.strip().lower() not in {"ok.", "ok"}:
-            raise RuntimeError(f"qBittorrent login failed: {response.text}")
+        # qBittorrent 4.x answers 200 with body "Ok."; 5.x answers 204 No
+        # Content. Both mean authenticated, so only an explicit 403 is a
+        # rejection -- checking the body alone broke every call on 5.x.
+        if response.status_code == 403:
+            raise RuntimeError(
+                f"qBittorrent rejected the credentials (403): {response.text}"
+            )
 
     def _get(self, path: str, **params: Any):
         response = self.session.get(
@@ -43,17 +53,69 @@ class TorrentManager:
         return response.text
 
     def add_magnet(self, task: Task, save_path: str) -> None:
-        result = self._post(
-            "/api/v2/torrents/add",
-            urls=task.magnet,
-            savepath=save_path,
-            stopped="true",
-            tags=task.id,
-        )
-        if result.strip() not in {"Ok.", "Ok"}:
+        try:
+            result = self._post(
+                "/api/v2/torrents/add",
+                urls=task.magnet,
+                savepath=save_path,
+                tags=task.id,
+            )
+        except HTTPError as exc:
+            if exc.response.status_code != 409:
+                raise
+            # 409: qBittorrent already has this torrent (its BT_backup lives in
+            # the persistent qbit-config). Adopt it under this task's tag so
+            # wait_for_hash can still find it -- otherwise the tag lookup times
+            # out against a torrent tagged for an earlier task.
+            infohash = self._infohash(task.magnet)
+            if not infohash:
+                raise RuntimeError(
+                    "qBittorrent reported the magnet as already present "
+                    "but its infohash could not be parsed"
+                ) from exc
+            self._post(
+                "/api/v2/torrents/setTags", hashes=infohash, tags=task.id
+            )
+            return
+
+        # qBittorrent 4.x replies "Ok."; 5.x replies JSON carrying counts.
+        if not self._add_accepted(result):
             raise RuntimeError(f"qBittorrent rejected magnet: {result}")
 
+    @staticmethod
+    def _add_accepted(result: str) -> bool:
+        """Did torrents/add accept the magnet? Both API generations say yes."""
+        if result.strip().lower() in {"ok.", "ok"}:
+            return True
+        try:
+            payload = json.loads(result)
+        except ValueError:
+            return False
+        return bool(payload.get("success_count"))
+
+    @staticmethod
+    def _infohash(magnet: str) -> str | None:
+        match = re.search(r"urn:btih:([0-9a-zA-Z]+)", magnet)
+        if not match:
+            return None
+        digest = match.group(1)
+        # Base32 (32 chars) and hex (40 chars) infohashes are both legal.
+        if len(digest) == 32:
+            try:
+                digest = base64.b32decode(digest).hex()
+            except (ValueError, binascii.Error):
+                return None
+        return digest.lower() if len(digest) == 40 else None
+
     def wait_for_hash(self, task: Task, timeout: int = 60) -> None:
+        """Block until the torrent exists *and* its metadata has arrived.
+
+        Waiting only for the hash is not enough: a magnet lists no files until
+        qBittorrent has fetched metadata from peers, and file selection is
+        impossible before then. Do not start the torrent stopped to "avoid
+        downloading" -- qBittorrent then never fetches metadata at all. File
+        priority (see select_files) is what actually limits the download.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             torrents = self._get("/api/v2/torrents/info", tag=task.id)
@@ -61,8 +123,17 @@ class TorrentManager:
                 torrent = torrents[0]
                 task.torrent_hash = torrent["hash"]
                 task.name = torrent["name"]
-                return
+                files = self._get(
+                    "/api/v2/torrents/files", hash=task.torrent_hash
+                )
+                if files:
+                    return
             time.sleep(1)
+        if task.torrent_hash:
+            raise TimeoutError(
+                f"Metadata never arrived for {task.torrent_hash} -- no peers? "
+                "Check the trackers and that outbound TCP/6881 is not blocked."
+            )
         raise TimeoutError("Torrent did not appear in qBittorrent")
 
     def refresh(self, task: Task) -> None:
@@ -111,18 +182,20 @@ class TorrentManager:
 
         deselected = all_files - selected
         if deselected:
+            # qBittorrent 5.x renamed these: `hash` not `hashes`, and
+            # `priority` not `prio`. The 4.x spelling returns 400.
             self._post(
                 "/api/v2/torrents/filePrio",
                 hash=task.torrent_hash,
                 id="|".join(map(str, deselected)),
-                prio=0,
+                priority=0,
             )
         if selected:
             self._post(
                 "/api/v2/torrents/filePrio",
                 hash=task.torrent_hash,
                 id="|".join(map(str, selected)),
-                prio=1,
+                priority=1,
             )
         task.selected_files = selected
 
