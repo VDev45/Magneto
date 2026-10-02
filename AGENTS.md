@@ -95,6 +95,10 @@ qBittorrent never fetches metadata for a stopped magnet, so `/torrents/files` st
 
 The managers take a `Task`; `TaskManager.tasks` holds `TaskRecord` wrappers. Three endpoints in `main.py` used `tasks.tasks.get(task_id)` and passed the wrapper straight through, producing `AttributeError: 'TaskRecord' object has no attribute 'torrent_hash'`. Use `tasks.get(task_id)` (returns `Task`, raises `KeyError`) or unwrap `.task` deliberately.
 
+### Never serialise models with `__dict__`
+
+`TorrentFile.is_video` is a `@property`, so it is **not** in `__dict__`. Serialising files with `f.__dict__` produced JSON without `is_video`, and the console's Range probe (`files.find(f => f.is_video)`) then reported *"no video file selected"* for every torrent — while the server-side `is_video` check kept working, so `curl` tests all passed. Use `TorrentFile.to_dict()`; the field list there is deliberate. `smoke_test.py` asserts this shape, which is the only reason the probe bug got caught.
+
 ### Queue behaviour
 
 `TaskManager(max_running=2)` — `max_running` is constructor-only, not env-configurable. Queued tasks are promoted inside `refresh()` (on `COMPLETED`) and inside `cancel()`/`remove()`. There is **no background thread**: a slot only frees up when some endpoint call happens to drive `refresh()`. Don't add polling.

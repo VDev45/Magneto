@@ -283,7 +283,7 @@ def console_state() -> dict[str, Any]:
             "state": str(task.state),
             "queue_state": str(record.queue_state),
             "progress": task.progress,
-            "files": [f.__dict__ for f in task.files],
+            "files": [f.to_dict() for f in task.files],
             "error": task.error,
             "download_speed": 0.0,
         }

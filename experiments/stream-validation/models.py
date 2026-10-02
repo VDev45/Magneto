@@ -28,6 +28,24 @@ class TorrentFile:
             "mp4", "mkv", "webm", "avi", "mov", "m4v", "ts"
         } if "." in self.name else False
 
+    def to_dict(self) -> dict[str, object]:
+        """Explicit API shape.
+
+        Do not serialise with ``__dict__``: is_video is a property, so it is
+        absent from the instance dict. The console's Range probe looks the
+        video file up by that key and silently reported 'no video file
+        selected' for every torrent.
+        """
+        return {
+            "index": self.index,
+            "name": self.name,
+            "size": self.size,
+            "progress": self.progress,
+            "priority": self.priority,
+            "path": self.path,
+            "is_video": self.is_video,
+        }
+
 
 @dataclass
 class Task:

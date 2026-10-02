@@ -51,7 +51,7 @@ def create_task(body: dict | None = None):
         "hash": task.torrent_hash,
         "name": task.name,
         "state": task.state,
-        "files": [f.__dict__ for f in task.files],
+        "files": [f.to_dict() for f in task.files],
     }
 
 
@@ -80,7 +80,7 @@ def get_task(task_id: str):
         "name": task.name,
         "state": task.state,
         "progress": task.progress,
-        "files": [f.__dict__ for f in task.files],
+        "files": [f.to_dict() for f in task.files],
     }
 
 

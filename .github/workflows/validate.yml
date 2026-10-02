@@ -226,6 +226,30 @@ jobs:
           echo
           echo "task.json written to \$RUNNER_TEMP/task.json"
 
+      - name: Smoke test the console UI and Range layer
+        run: |
+          set -uo pipefail
+          cd "$EXPERIMENT_DIR"
+          # Asserts what browser devtools would show -- status codes, headers,
+          # byte counts. It selects the video file, because that is the only
+          # thing that puts bytes on disk to range over. Playback and seeking
+          # stay human steps.
+          out=$("$RUNNER_TEMP/venv/bin/python" smoke_test.py \
+            --base-url "http://127.0.0.1:${{ inputs.port }}" \
+            --video-timeout 180 2>&1) && rc=0 || rc=$?
+          echo "$out"
+          {
+            echo "### Scripted console + Range smoke test"
+            echo
+            echo '```'
+            echo "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Console/Range smoke test failed -- see the table above."
+          fi
+          exit "$rc"
+
       - name: Test summary
         run: |
           {
@@ -246,13 +270,13 @@ jobs:
             echo '```'
             echo
             echo "### What to check (PLAN.md §1)"
-            echo "1. Task appears in the console with files listed."
-            echo "2. Progress climbs while staying below 100%."
-            echo "3. **Range probe** returns \`206 Partial Content\`."
-            echo "4. Player starts before 100%."
-            echo "5. Copy the stream URL into VLC and seek forward/backward."
+            echo "The smoke test already selected the video file for you, so the"
+            echo "download is running. Remaining human steps:"
+            echo "1. Task shows progress climbing in the console."
+            echo "2. Player starts before 100%."
+            echo "3. Copy the stream URL into VLC and seek forward/backward."
             echo
-            echo "Step 5 is the real gate. Cancel this job when done."
+            echo "Step 3 is the real gate. Cancel this job when done."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Hold open for manual testing
