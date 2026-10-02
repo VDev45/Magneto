@@ -85,7 +85,7 @@ def wait_for_torrent(timeout: int = 300) -> dict:
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-            torrents = qbit_get("/api/v2/torrents/info", hashes=TORRENT_HASH)
+        torrents = qbit_get("/api/v2/torrents/info", hashes=TORRENT_HASH)
         if torrents:
             torrent = torrents[0]
             files = qbit_get("/api/v2/torrents/files", hash=torrent["hash"])
@@ -221,3 +221,31 @@ def stream(request: Request):
         headers=headers,
         media_type=content_type,
     )
+
+
+@app.get("/state")
+def state():
+    if not TORRENT_HASH:
+        raise HTTPException(status_code=404, detail="Torrent session has not started")
+
+    qbit_login()
+    torrent = qbit_get("/api/v2/torrents/info", hashes=TORRENT_HASH)
+    if not torrent:
+        raise HTTPException(status_code=404, detail="Torrent no longer exists")
+
+    pieces = qbit_get("/api/v2/torrents/pieceStates", hash=TORRENT_HASH)
+
+    return {
+        "hash": TORRENT_HASH,
+        "name": torrent[0]["name"],
+        "progress": torrent[0]["progress"],
+        "downloaded": torrent[0]["downloaded"],
+        "download_speed": torrent[0]["dlspeed"],
+        "state": torrent[0]["state"],
+        "piece_states": {
+            "not_downloaded": pieces.count(0),
+            "downloading": pieces.count(1),
+            "downloaded": pieces.count(2),
+            "total": len(pieces),
+        },
+    }
