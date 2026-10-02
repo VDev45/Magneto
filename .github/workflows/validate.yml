@@ -16,12 +16,6 @@ on:
         required: false
         default: "8000"
         type: string
-      hold_minutes:
-        description: "How long to stay up for manual testing."
-        required: false
-        default: "350"
-        type: string
-
 # GitHub-hosted by design. The runner is disposable and has no inbound route,
 # so the console is exposed through a temporary Cloudflare quick tunnel.
 
@@ -405,9 +399,8 @@ jobs:
           echo "Task:    $task_id"
           echo "Heartbeat every 15s: console + task + pieces + qBittorrent"
 
-          deadline=$(( SECONDS + ${{ inputs.hold_minutes }} * 60 ))
           heartbeat=0
-          while [ $SECONDS -lt $deadline ]; do
+          while true; do
             heartbeat=$((heartbeat + 1))
             now=$(date -Is)
             console_code=$(curl -s -o /dev/null -m 5 -w "%{http_code}" "http://127.0.0.1:${{ inputs.port }}/console" || true)
@@ -425,7 +418,7 @@ jobs:
             printf "%s\n" "$state_json" > "$RUNNER_TEMP/last-state.json"
             sleep 15
           done
-          echo "[$(date -Is)] Manual hold window elapsed."
+          echo "Manual hold ended because the workflow was cancelled or GitHub reached its job timeout."
       - name: Dump diagnostics
         if: always()
         run: |
