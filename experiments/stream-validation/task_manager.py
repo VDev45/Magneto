@@ -83,12 +83,23 @@ class TaskManager:
         self._touch(task)
         return task
 
+    def _start_next_queued(self) -> None:
+        slots = self.max_running - self._running_count()
+        if slots <= 0:
+            return
+        queued = [r for r in self.tasks.values() if r.queue_state == QueueState.QUEUED and r.task.selected_files]
+        for record in queued[:slots]:
+            self.torrents.start(record.task)
+            record.queue_state = QueueState.RUNNING
+            record.task.state = TaskState.DOWNLOADING
+            self._touch(record.task)
     def refresh(self, task: Task) -> Task:
         try:
             self.torrents.refresh(task)
             record = self.tasks[task.id]
             if task.state == TaskState.COMPLETED:
                 record.queue_state = QueueState.STOPPED
+                self._start_next_queued()
             self._touch(task)
             return task
         except Exception as exc:
@@ -102,6 +113,7 @@ class TaskManager:
         self.torrents.stop(task)
         task.state = TaskState.CANCELLED
         self.tasks[task.id].queue_state = QueueState.STOPPED
+        self._start_next_queued()
         self._touch(task)
 
     def remove(self, task: Task) -> None:
