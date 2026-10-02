@@ -334,7 +334,7 @@ jobs:
           echo
           echo "task.json written to $RUNNER_TEMP/task.json"
           echo "::group::Created task"
-          jq '.{id, hash, name, state}' "$RUNNER_TEMP/task.json"
+          jq '{id, hash, name, state, file_count: (.files | length), video_files: [.files[] | select(.is_video == true) | {index, name, size, progress}]}' "$RUNNER_TEMP/task.json"
           echo "::endgroup::"
       - name: Smoke test the console UI and Range layer
         run: |
