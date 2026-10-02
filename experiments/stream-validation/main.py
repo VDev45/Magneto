@@ -111,3 +111,21 @@ def stream(task_id: str, file_index: int, request: Request):
 
     task.state = TaskState.STREAMING
     return stream_file(request, task, torrent_file, files)
+
+@app.post("/tasks/{task_id}/cancel")
+def cancel(task_id: str):
+    try:
+        task = tasks.get(task_id)
+    except KeyError:
+        raise HTTPException(404, "Task not found")
+    tasks.cancel(task)
+    return {"id": task.id, "state": task.state}
+
+@app.delete("/tasks/{task_id}")
+def remove(task_id: str):
+    try:
+        task = tasks.get(task_id)
+    except KeyError:
+        raise HTTPException(404, "Task not found")
+    tasks.remove(task)
+    return {"id": task_id, "removed": True}
