@@ -1,0 +1,216 @@
+name: Stream validation
+
+# Manual only. This is an experiment harness, not CI: it needs a torrent to
+# download, a long-lived qBittorrent, and a human watching the stream. It must
+# never run on push (PLAN.md §1: prove the streaming path before building).
+on:
+  workflow_dispatch:
+    inputs:
+      magnet:
+        description: "Magnet to test. Leave blank to use the Sintel open-movie torrent."
+        required: false
+        default: ""
+        type: string
+      port:
+        description: "Port for the console/API (port-forward this to your machine)."
+        required: false
+        default: "8000"
+        type: string
+      hold_minutes:
+        description: "How long to stay up for manual testing."
+        required: false
+        default: "45"
+        type: string
+
+# Self-hosted by design. GitHub-hosted runners are ephemeral with no inbound
+# connectivity, so they cannot be port-forwarded to -- and BitTorrent peers
+# frequently cannot connect to Azure datacenter IPs at all, so metadata would
+# never arrive and the run would prove nothing.
+
+permissions:
+  contents: read
+
+env:
+  EXPERIMENT_DIR: experiments/stream-validation
+  # Sintel (Blender Foundation open movie, CC-BY 3.0) -- freely distributable,
+  # 123 MB, so a partial-download test completes quickly.
+  # infohash is SHA1 of the bencoded info dict, NOT of the whole .torrent file.
+  # Verified against https://webtorrent.io/torrents/sintel.torrent
+  #   sha1(bencode(info)) = 08ada5a7a6183aae1e09d831df6748d566095a10
+  MAGNET: magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fann&tr=udp%3A%2F%2Fopen.demonii.com%3A1337%2Fann&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fann&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fann
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    timeout-minutes: 90
+    steps:
+      - name: Fail fast on leftover state from a previous run
+        run: |
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down -v --remove-orphans || true
+          pkill -f "[u]vicorn console:app" || true
+          pkill -f "[u]vicorn main:app" || true
+          sleep 2
+
+      - name: Check runner prerequisites
+        run: |
+          set -euo pipefail
+          command -v docker
+          docker info >/dev/null   # fails loudly if the daemon is not running
+          command -v python3
+          python3 -c 'import sys; assert sys.version_info >= (3,11), sys.version'
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r "$EXPERIMENT_DIR/requirements.txt"
+          python -m unittest discover -s "$EXPERIMENT_DIR" -t "$EXPERIMENT_DIR" -v
+
+      - name: Resolve magnet
+        id: magnet
+        run: |
+          if [ -n '${{ inputs.magnet }}' ]; then
+            echo "value=${{ inputs.magnet }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$MAGNET" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start qBittorrent
+        run: |
+          set -euo pipefail
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" up -d
+          echo "waiting for WebUI..."
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080/; then
+              echo "qBittorrent WebUI up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          docker ps --filter name=magneto-qbittorrent
+
+      - name: Resolve qBittorrent password
+        id: qbit
+        run: |
+          set -euo pipefail
+          # qBittorrent generates a random password only on first start. The
+          # config lives in qbit-config/ which persists between runs, so once
+          # set the log no longer contains it -- prefer an explicit override.
+          if [ -n "${{ vars.QBIT_PASSWORD }}" ]; then
+            echo "password=${{ vars.QBIT_PASSWORD }}" >> "$GITHUB_OUTPUT"
+            echo "source=repository variable vars.QBIT_PASSWORD" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          pw=$(docker logs magneto-qbittorrent 2>&1 \
+               | grep -ioE "temporary password.*|password.*: *[A-Za-z0-9~]+" \
+               | grep -oE "[A-Za-z0-9~]{8,}" | head -1 || true)
+          if [ -n "$pw" ]; then
+            echo "password=$pw" >> "$GITHUB_OUTPUT"
+            echo "source=container log (first run)" >> "$GITHUB_OUTPUT"
+          else
+            echo "password=adminadmin" >> "$GITHUB_OUTPUT"
+            echo "source=fallback default -- SET vars.QBIT_PASSWORD if login fails" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Start the console API
+        env:
+          QBIT_PASSWORD: ${{ steps.qbit.outputs.password }}
+          LOCAL_SAVE_PATH: ${{ github.workspace }}/experiments/stream-validation/downloads
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOCAL_SAVE_PATH"
+          cd "$EXPERIMENT_DIR"
+          nohup python -m uvicorn console:app --host 0.0.0.0 --port "${{ inputs.port }}" \
+            > "$RUNNER_TEMP/console.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/console.pid"
+          echo "log: $RUNNER_TEMP/console.log"
+
+      - name: Wait for the console
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null "http://127.0.0.1:${{ inputs.port }}/console"; then
+              echo "console up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "console failed to start:"; cat "$RUNNER_TEMP/console.log"; exit 1
+
+      - name: Start the magnet
+        env:
+          QBIT_PASSWORD: ${{ steps.qbit.outputs.password }}
+        run: |
+          set -euo pipefail
+          echo "Submitting magnet -- resolves metadata, does not start downloading."
+          curl -sS -X POST "http://127.0.0.1:${{ inputs.port }}/tasks" \
+            -H 'Content-Type: application/json' \
+            -d "$(python3 -c 'import json,sys; print(json.dumps({"magnet": sys.argv[1]}))' '${{ steps.magnet.outputs.value }}')" \
+            | tee "$RUNNER_TEMP/task.json"
+          echo
+          echo "If this fails with 401/500 the qBittorrent password is wrong."
+          echo "Set repository variable QBIT_PASSWORD and re-run."
+
+      - name: Test summary
+        run: |
+          {
+            echo "## Stream validation running"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Port | \`${{ inputs.port }}\` |"
+            echo "| Console | \`http://localhost:${{ inputs.port }}/console\` |"
+            echo "| API docs | \`http://localhost:${{ inputs.port }}/docs\` |"
+            echo "| Runner | ${{ runner.name }} |"
+            echo "| qBittorrent password source | ${{ steps.qbit.outputs.source }} |"
+            echo "| Magnet | \`${{ steps.magnet.outputs.value }}\` |"
+            echo
+            echo "### Port forward"
+            echo '```bash'
+            echo "ssh -L ${{ inputs.port }}:localhost:${{ inputs.port }} <this-runner>"
+            echo '```'
+            echo
+            echo "### What to check (PLAN.md §1)"
+            echo "1. Task appears in the console with files listed."
+            echo "2. Progress climbs while staying below 100%."
+            echo "3. **Range probe** returns \`206 Partial Content\`."
+            echo "4. Player starts before 100%."
+            echo "5. Copy the stream URL into VLC and seek forward/backward."
+            echo
+            echo "Step 5 is the real gate. Cancel this job when done."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hold open for manual testing
+        run: |
+          set -euo pipefail
+          echo "Console on port ${{ inputs.port }} for ${{ inputs.hold_minutes }} minutes."
+          echo "Cancel this job when you are finished."
+          deadline=$(( SECONDS + ${{ inputs.hold_minutes }} * 60 ))
+          while [ $SECONDS -lt $deadline ]; do
+            if ! curl -sf -o /dev/null "http://127.0.0.1:${{ inputs.port }}/console"; then
+              echo "::warning::console stopped responding"
+              tail -40 "$RUNNER_TEMP/console.log" || true
+            fi
+            sleep 15
+          done
+          echo "hold window elapsed"
+
+      - name: Dump diagnostics
+        if: always()
+        run: |
+          echo "### console.log"; tail -60 "$RUNNER_TEMP/console.log" || true
+          echo "### task.json"; cat "$RUNNER_TEMP/task.json" 2>/dev/null || true
+          echo "### qBittorrent torrents"
+          docker exec magneto-qbittorrent sh -c 'ls -la /downloads/*/ 2>/dev/null' || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          [ -f "$RUNNER_TEMP/console.pid" ] && kill "$(cat "$RUNNER_TEMP/console.pid")" 2>/dev/null || true
+          pkill -f "[u]vicorn console:app" || true
+          docker compose -f "$EXPERIMENT_DIR/docker-compose.yml" down -v --remove-orphans || true

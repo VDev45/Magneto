@@ -142,6 +142,19 @@ class TorrentManager:
             "/api/v2/torrents/pieceStates", hash=task.torrent_hash
         )
 
+    def status(self, task: Task) -> dict[str, Any] | None:
+        """Raw engine info for one task, or None if the torrent is gone.
+
+        Reporting stays behind this class so nothing else reaches the
+        qBittorrent API directly (PLAN.md §9: TorrentManager owns "status").
+        """
+        if not task.torrent_hash:
+            return None
+        torrents = self._get(
+            "/api/v2/torrents/info", hashes=task.torrent_hash
+        )
+        return torrents[0] if torrents else None
+
     def remove(self, task: Task, delete_files: bool = False) -> None:
         if not task.torrent_hash:
             return

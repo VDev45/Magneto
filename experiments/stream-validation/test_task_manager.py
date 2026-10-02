@@ -14,6 +14,9 @@ class FakeTorrentManager:
     def login(self):
         self.logged_in += 1
 
+    def status(self, task):
+        return {"dlspeed": 0, "state": "downloading"}
+
     def add_magnet(self, task, save_path):
         pass
 

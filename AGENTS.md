@@ -11,6 +11,20 @@ Deps: `pip install -r experiments/stream-validation/requirements.txt` (fastapi, 
 
 No `httpx` is installed, so FastAPI's `TestClient` is unavailable — it would raise on import. Test endpoints by calling the handler directly with `main.tasks` / `main.torrents` swapped for stubs (see `test_api_tasks.py`).
 
+### Browser console
+
+`console.py` exposes `GET /console` and `GET /console/state` by adding routes to `main.app`, so `uvicorn console:app` serves the console **and** every lifecycle endpoint. It is test scaffolding for PLAN.md §1, not part of the architecture — but it still routes through `TorrentManager`, never the qBittorrent API directly.
+
+The console's Range probe is what actually proves `206 Partial Content`; the `<video>` element only proves a browser will play the head of the file.
+
+### CI: `workflow_dispatch` only, self-hosted
+
+`.github/workflows/validate.yml` runs the whole experiment on a **self-hosted** runner: it needs a live qBittorrent, a long download, and a human watching. Never add `on: push` / `pull_request` — PLAN.md §1 requires the experiment to pass before feature work, and a bot re-running it on every commit proves nothing.
+
+Hosted runners are the wrong tool twice over: no inbound connectivity (so no port forwarding), and Azure IPs often can't reach BitTorrent peers, so metadata never arrives.
+
+The default magnet is Sintel (Blender open movie, CC-BY 3.0, 123 MB). If you swap it, recompute the infohash as `sha1(bencode(info_dict))` — **not** SHA1 of the whole `.torrent` file. The wrong hash yields a magnet that silently never resolves.
+
 ## Commands
 
 ```bash

@@ -73,6 +73,31 @@ curl -X POST localhost:8000/tasks \
 
 7. Use `POST /tasks/{task_id}/select` to select a video file, then open `/stream/{task_id}/{file_index}` in VLC/MX Player.
 
+## Browser test console
+
+For interactive testing there is a console that adds a UI on top of the same
+API. It serves everything `main.py` does, plus a task list, live piece states,
+a Range probe, and a player:
+
+```bash
+cd experiments/stream-validation
+export LOCAL_SAVE_PATH="$PWD/downloads"
+export QBIT_PASSWORD='...'
+uvicorn console:app --port 8000
+```
+
+Then open <http://127.0.0.1:8000/console>.
+
+The **Range probe** sends a real `Range` header and reports the status,
+headers and byte count — `206 Partial Content` is the thing to confirm.
+The `<video>` element only proves a browser will play the head of the file;
+far-ahead seeking on a partial download needs VLC/MX Player, which is the
+actual gate (PLAN.md §23).
+
+There is also a manual CI workflow at `.github/workflows/validate.yml`
+(`Actions → Stream validation → Run workflow`) that starts everything on a
+self-hosted runner and holds it open for testing.
+
 ## Environment
 
 - `QBIT_URL` — default `http://127.0.0.1:8080`
@@ -80,7 +105,7 @@ curl -X POST localhost:8000/tasks \
 - `QBIT_PASSWORD` — default `adminadmin`
 - `QBIT_REMOTE_SAVE_PATH` — qBittorrent container path, default `/downloads`
 - `LOCAL_SAVE_PATH` — host path mapped to that container path, default `./experiments/stream-validation/downloads`
-- `MAGNET_URI` — required
+- `MAGNET_URI` — fallback magnet; a magnet in the `POST /tasks` body takes precedence
 
 ## Validation checklist
 
