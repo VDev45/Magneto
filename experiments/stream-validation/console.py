@@ -10,6 +10,7 @@ qBittorrent directly, it reads the same managers ``main`` owns.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import main
@@ -17,40 +18,92 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 app = main.app
 
+# The page's JavaScript lives in console.js next to this file and is served
+# verbatim.
+#
+# It used to be a triple-quoted Python string. Two problems with that: the
+# file on disk and the string in this module drifted apart until editing the
+# .js did nothing at all, and a non-raw Python string silently rewrites
+# escapes -- a JS "\n" became a real newline byte inside a quoted literal,
+# which is a SyntaxError, so Chrome discarded the whole script and the
+# console rendered as dead HTML while every HTTP test still passed.
+#
+# Serving the file removes both hazards by construction: there is one copy,
+# and no escape is ever interpreted.
+CONSOLE_JS_PATH = Path(__file__).with_name("console.js")
+
 CONSOLE_HTML = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- viewport is what makes this mobile-friendly at all; without it a phone
+     lays the page out at ~980px and scales it down. -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
 <title>Magneto — stream validation console</title>
 <style>
-  :root { color-scheme: dark; }
+  :root { color-scheme: dark; --bg:#0f1115; --card:#171a21; --line:#262b36;
+          --mut:#8b93a1; --accent:#2d5bd7; --ghost:#2a2f3a; }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 24px; background: #0f1115; color: #e6e6e6;
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; padding: 24px; background: var(--bg); color: #e6e6e6;
          font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   h2 { font-size: 15px; margin: 0 0 10px; }
-  .sub { color: #8b93a1; margin-bottom: 20px; }
+  .sub { color: var(--mut); margin-bottom: 20px; }
   .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; align-items: start; }
   @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-  .card { background: #171a21; border: 1px solid #262b36; border-radius: 8px; padding: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+          margin-bottom: 16px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
-  button { background: #2d5bd7; color: #fff; border: 0; border-radius: 5px;
-           padding: 7px 13px; cursor: pointer; font: inherit; }
-  button.ghost { background: #2a2f3a; }
+  button { background: var(--accent); color: #fff; border: 0; border-radius: 5px;
+           padding: 9px 15px; cursor: pointer; font: inherit; min-height: 38px; }
+  button.ghost { background: var(--ghost); }
   button:disabled { opacity: .45; cursor: not-allowed; }
-  input { background: #0f1115; border: 1px solid #333a48; color: #e6e6e6;
-          border-radius: 5px; padding: 7px 9px; font: inherit; width: 100%; }
+  button.sm { padding: 6px 11px; min-height: 32px; font-size: 13px; }
+  /* 16px stops iOS Safari from zooming the viewport when a field is focused. */
+  input { background: var(--bg); border: 1px solid #333a48; color: #e6e6e6;
+          border-radius: 5px; padding: 9px; font: inherit; width: 100%; font-size: 16px; }
+  input[type=checkbox] { width: auto; min-height: 0; margin: 0; }
+  /* Tables scroll sideways inside their card rather than widening the page. */
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 0 -4px; padding: 0 4px; }
   table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #232833; font-size: 13px; }
-  th { color: #8b93a1; font-weight: 500; }
-  .bar { height: 7px; background: #232833; border-radius: 4px; overflow: hidden; min-width: 90px; }
+  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid #232833; font-size: 13px; }
+  th { color: var(--mut); font-weight: 500; white-space: nowrap; }
+  tr.sel td { background: #1c212b; }
+  .wrap { word-break: break-all; max-width: 22ch; }
+  .nowrap { white-space: nowrap; }
+  /* Long torrent filenames are the widest cell; truncate instead of forcing
+     a horizontal scroll on a narrow screen. */
+  td.name { max-width: 30ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.actions { white-space: nowrap; }
+  td.actions button + button { margin-left: 5px; }
+  .prog { display: flex; gap: 8px; align-items: center; min-width: 120px; }
+  .chips { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 8px; }
+  .bar { height: 7px; background: #232833; border-radius: 4px; overflow: hidden; min-width: 90px; flex: 1; }
   .bar > i { display: block; height: 100%; background: #2d9d5c; }
   video { width: 100%; background: #000; border-radius: 6px; }
-  pre { background: #0f1115; border: 1px solid #262b36; border-radius: 6px;
-        padding: 10px; overflow: auto; max-height: 300px; font-size: 12px; white-space: pre-wrap; }
-  .tag { background: #232833; border-radius: 4px; padding: 1px 7px; font-size: 12px; }
-  .v { color: #6bbf7b; } .err { color: #e06c75; } .mut { color: #8b93a1; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+        padding: 10px; overflow: auto; max-height: 300px; font-size: 12px; white-space: pre-wrap;
+        word-break: break-word; }
+  .tag { background: #232833; border-radius: 4px; padding: 1px 7px; font-size: 12px;
+         white-space: nowrap; display: inline-block; }
+  .v { color: #6bbf7b; } .err { color: #e06c75; } .mut { color: var(--mut); }
   label { display: flex; gap: 7px; align-items: center; cursor: pointer; }
+
+  /* Phones: tighter padding, full-width controls, comfortable tap targets. */
+  @media (max-width: 640px) {
+    body { padding: 14px; }
+    h1 { font-size: 17px; }
+    .card { padding: 13px; margin-bottom: 13px; }
+    .sub { margin-bottom: 14px; }
+    .row > input, .row > button { width: 100%; }
+    .row > button { justify-content: center; }
+    td.name { max-width: 16ch; }
+    .wrap { max-width: 14ch; }
+    pre { max-height: 220px; }
+    .prog { min-width: 96px; }
+  }
 </style>
 </head>
 <body>
@@ -62,59 +115,64 @@ CONSOLE_HTML = """<!doctype html>
 
 <div class="grid">
   <div>
-    <div class="card" style="margin-bottom:16px">
+    <div class="card">
       <h2>Create task</h2>
       <div class="row">
-        <input id="magnet" placeholder="magnet:?xt=urn:btih:... (blank = MAGNET_URI fallback)">
-        <button onclick="createTask()">Create</button>
+        <input id="magnet" placeholder="magnet:?xt=urn:btih:..." autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false">
       </div>
-      <div class="sub" id="createMsg"></div>
+      <div class="row">
+        <button id="createTask">Create</button>
+        <button id="pasteMagnet" class="ghost">Paste magnet</button>
+      </div>
+      <div class="sub" id="createMsg">Paste a magnet, or copy one elsewhere and tap the field — it reads the clipboard.</div>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="card">
       <h2>Tasks</h2>
-      <table><thead><tr>
+      <div class="scroll"><table><thead><tr>
         <th>magnet</th><th>state</th><th>progress</th><th>speed</th><th></th>
-      </tr></thead><tbody id="tasks"></tbody></table>
+      </tr></thead><tbody id="tasks"></tbody></table></div>
     </div>
 
     <div class="card">
       <h2>Files — <span id="taskLabel" class="mut"></span></h2>
       <div class="row">
-        <button onclick="selectAll(true)">All</button>
-        <button onclick="selectAll(false)">None</button>
-        <button onclick="doSelect()">Start / Queue</button>
-        <button class="ghost" onclick="cancelTask()">Cancel</button>
-        <button class="ghost" onclick="removeTask()">Remove</button>
+        <button data-act="selectAll" onclick="selectAll(true)">All</button>
+        <button data-act="selectAll" onclick="selectAll(false)">None</button>
+        <button data-act="doSelect">Start / Queue</button>
+        <button class="ghost" data-act="cancelTask">Cancel</button>
+        <button class="ghost" data-act="removeTask">Remove</button>
       </div>
-      <table><thead><tr>
-        <th></th><th>#</th><th>name</th><th>size</th><th>prog</th><th>video</th><th>play</th>
-      </tr></thead><tbody id="files"></tbody></table>
+      <div class="scroll"><table><thead><tr>
+        <th></th><th>#</th><th>name</th><th>size</th><th>prog</th><th>video</th><th></th>
+      </tr></thead><tbody id="files"></tbody></table></div>
+      <div class="sub" id="dlMsg"></div>
     </div>
   </div>
 
   <div>
-    <div class="card" style="margin-bottom:16px">
+    <div class="card">
       <h2>Pieces — <span id="pieceLabel" class="mut"></span></h2>
       <div id="pieces" class="sub">no task selected</div>
     </div>
 
-    <div class="card" style="margin-bottom:16px">
+    <div class="card">
       <h2>Range probe</h2>
       <div class="row">
-        <input id="range" placeholder="bytes=0-1048575">
-        <button onclick="probe()">Fetch</button>
+        <input id="range" placeholder="bytes=0-1048575" autocomplete="off" spellcheck="false">
       </div>
+      <div class="row"><button data-act="probe">Fetch</button></div>
       <pre id="probeOut" class="mut">Sends a real Range request to /stream and reports status, headers and byte count. 206 = Partial Content.</pre>
     </div>
 
     <div class="card">
       <h2>Player</h2>
-      <video id="player" controls preload="metadata"></video>
+      <video id="player" controls preload="metadata" playsinline></video>
       <div class="row" style="margin-top:10px">
-        <input id="vlcUrl" readonly placeholder="stream URL — paste into VLC / MX Player">
-        <button onclick="copyVlc()">Copy</button>
+        <input id="vlcUrl" readonly placeholder="stream URL — copy into VLC / MX Player">
       </div>
+      <div class="row"><button class="ghost" data-act="copyVlc">Copy stream URL</button></div>
       <div class="sub">VLC/MX Player is the real gate (PLAN.md §23). Far-ahead seeking on a partial file does not work reliably in a browser.</div>
     </div>
   </div>
@@ -126,170 +184,6 @@ CONSOLE_HTML = """<!doctype html>
 """
 
 
-CONSOLE_JS = """let current = null, files = [];
-
-const $ = id => document.getElementById(id);
-const mb = b => (b / 1048576).toFixed(1) + " MB";
-const esc = s => String(s ?? "").replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
-
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  const body = await r.text();
-  let json = null;
-  try { json = JSON.parse(body); } catch (e) {}
-  return { ok: r.ok, status: r.status, json, body };
-}
-
-async function createTask() {
-  const input = $("magnet");
-  const button = document.querySelector('button[onclick="createTask()"]');
-  const message = $("createMsg");
-  const magnet = input.value.trim();
-
-  if (magnet && !magnet.toLowerCase().startsWith("magnet:?")) {
-    message.innerHTML = '<span class="err">That does not look like a magnet URI.</span>';
-    input.focus();
-    return;
-  }
-
-  button.disabled = true;
-  message.innerHTML = '<span class="mut">Creating task… waiting for qBittorrent to resolve metadata.</span>';
-
-  try {
-    const opts = {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(magnet ? { magnet } : {})
-    };
-    const r = await api("/tasks", opts);
-
-    if (r.ok) {
-      message.innerHTML = '<span class="v">created ' + esc(r.json.id) +
-        ' — ' + esc(r.json.name || 'metadata ready') + '</span>';
-      input.value = "";
-      await refresh();
-      await pick(r.json.id);
-    } else {
-      message.innerHTML = '<span class="err">Create failed (' + r.status + '): ' +
-        esc(r.json?.detail || r.body || 'unknown error') + '</span>';
-    }
-  } catch (e) {
-    message.innerHTML = '<span class="err">Create failed: ' + esc(e?.message || e) + '</span>';
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function refresh() {
-  const t = $("tasks");
-  const r = await api("/console/state");
-  if (!r.ok) { t.innerHTML = '<tr><td colspan="5" class="err">' + r.status + "</td></tr>"; return; }
-  const list = r.json.tasks;
-  $("age").textContent = "updated " + new Date().toLocaleTimeString();
-
-  if (!list.length) {
-    t.innerHTML = '<tr><td colspan="5" class="mut">no tasks yet</td></tr>';
-    if (current) { current = null; $("taskLabel").textContent = ""; $("files").innerHTML = ""; }
-    return;
-  }
-  if (!current || !list.some(x => x.id === current)) current = list[list.length - 1].id;
-
-  t.innerHTML = list.map(x => `
-    <tr>
-      <td><a href="#" onclick="pick('${x.id}');return false" class="${x.id === current ? "v" : ""}">${esc(x.id.slice(0, 8))}</a>
-          <div class="mut" style="font-size:11px">${esc((x.magnet || "").slice(-12))}</div></td>
-      <td><span class="tag">${esc(x.state)}</span>${x.queue_state ? ' <span class="mut">' + esc(x.queue_state) + "</span>" : ""}</td>
-      <td><div class="row" style="margin:0"><div class="bar"><i style="width:${(x.progress * 100).toFixed(1)}%"></i></div>
-          <span class="mut">${(x.progress * 100).toFixed(1)}%</span></div></td>
-      <td class="mut">${x.download_speed ? mb(x.download_speed) + "/s" : "—"}</td>
-      <td><button class="ghost" onclick="pick('${x.id}')">open</button></td>
-    </tr>`).join("");
-
-  await loadDetail();
-}
-
-async function pick(id) { current = id; await loadDetail(); }
-
-async function loadDetail() {
-  const d = await api("/tasks/" + current);
-  if (!d.ok) return;
-  files = d.json.files || [];
-  $("taskLabel").textContent = current.slice(0, 8) + " — " + (d.json.name || "resolving metadata…");
-  $("files").innerHTML = files.map(f => `
-    <tr>
-      <td><input type="checkbox" class="fs" value="${f.index}"></td>
-      <td class="mut">${f.index}</td>
-      <td>${esc(f.name)}</td>
-      <td class="mut">${mb(f.size)}</td>
-      <td><div class="bar"><i style="width:${(f.progress * 100).toFixed(1)}%"></i></div></td>
-      <td>${f.is_video ? '<span class="v">yes</span>' : '<span class="mut">no</span>'}</td>
-      <td><button class="ghost" onclick="play(${f.index})">play</button></td>
-    </tr>`).join("") || '<tr><td colspan="7" class="mut">no files yet</td></tr>';
-
-  const p = await api("/tasks/" + current + "/state");
-  if (p.ok) {
-    const ps = p.json.piece_states;
-    $("pieceLabel").textContent = current.slice(0, 8);
-    $("pieces").innerHTML =
-      `<div class="row">
-        <span class="tag">${ps.total} pieces</span>
-        <span class="tag v">${ps.downloaded} downloaded</span>
-        <span class="tag">${ps.downloading} downloading</span>
-        <span class="tag mut">${ps.not_downloaded} pending</span>
-      </div>
-      <div class="bar"><i style="width:${(ps.downloaded / ps.total * 100).toFixed(1)}%"></i></div>`;
-  }
-}
-
-function selectAll(on) {
-  document.querySelectorAll(".fs").forEach(c => { if (on || c.checked) c.checked = on; });
-}
-
-async function doSelect() {
-  const idx = [...document.querySelectorAll(".fs")].filter(c => c.checked).map(c => +c.value);
-  if (!idx.length) return;
-  const r = await api("/tasks/" + current + "/select", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_indexes: idx }) });
-  alert(r.ok ? "state: " + r.json.state : r.status + " " + r.body);
-  refresh();
-}
-
-async function cancelTask() { await api("/tasks/" + current + "/cancel", { method: "POST" }); refresh(); }
-async function removeTask() { await api("/tasks/" + current, { method: "DELETE" }); refresh(); }
-
-function play(i) {
-  const url = "/stream/" + current + "/" + i;
-  $("player").src = url;
-  $("vlcUrl").value = window.location.origin + url;
-  $("player").play().catch(() => {});
-}
-
-function copyVlc() { $("vlcUrl").select(); document.execCommand("copy"); }
-
-async function probe() {
-  const v = files.find(f => f.is_video);
-  if (!v) return ($("probeOut").innerHTML = '<span class="err">no video file selected</span>');
-  const range = $("range").value.trim() || "bytes=0-1048575";
-  const url = "/stream/" + current + "/" + v.index;
-  const t0 = performance.now();
-  let r;
-  try { r = await fetch(url, { headers: { Range: range } }); }
-  catch (e) { $("probeOut").innerHTML = '<span class="err">' + esc(e) + "</span>"; return; }
-  const buf = await r.arrayBuffer();
-  const ms = (performance.now() - t0).toFixed(0);
-  const head = [...r.headers.entries()].map(([k, v]) => k + ": " + v).join("\\n");
-  $("probeOut").innerHTML =
-    `<span class="${r.status === 206 ? "v" : "err"}">HTTP ${r.status} ${r.status === 206 ? "(206 Partial Content OK)" : "UNEXPECTED"}</span>\n` +
-    esc(head) + "\\n\\n" +
-    "received: " + buf.byteLength + " bytes in " + ms + " ms\\n" +
-    "first 16 bytes: " + [...new Uint8Array(buf).slice(0, 16)].map(b => b.toString(16).padStart(2, "0")).join(" ");
-}
-
-refresh();
-setInterval(refresh, 2000);
-"""
-
 @app.get("/console", response_class=HTMLResponse, include_in_schema=False)
 def console() -> str:
     return CONSOLE_HTML
@@ -297,7 +191,12 @@ def console() -> str:
 
 @app.get("/console.js", response_class=PlainTextResponse, include_in_schema=False)
 def console_js() -> str:
-    return CONSOLE_JS
+    """The page script, served byte-for-byte from console.js.
+
+    Reading the file rather than holding it in a Python literal means a JS
+    escape can never be reinterpreted on the way out. See CONSOLE_JS_PATH.
+    """
+    return CONSOLE_JS_PATH.read_text(encoding="utf-8")
 
 
 @app.get("/console/state", include_in_schema=False)

@@ -95,13 +95,23 @@ qBittorrent never fetches metadata for a stopped magnet, so `/torrents/files` st
 
 The managers take a `Task`; `TaskManager.tasks` holds `TaskRecord` wrappers. Three endpoints in `main.py` used `tasks.tasks.get(task_id)` and passed the wrapper straight through, producing `AttributeError: 'TaskRecord' object has no attribute 'torrent_hash'`. Use `tasks.get(task_id)` (returns `Task`, raises `KeyError`) or unwrap `.task` deliberately.
 
-### The console's JavaScript lives inside a Python string
+### The console's JavaScript is a real file, served verbatim
 
-`CONSOLE_HTML` in `console.py` is a plain (non-raw) triple-quoted string containing an inline `<script>`. So a `\n` written in the JS becomes a **real newline byte** before it reaches the browser.
+`console.js` sits next to `console.py` and `/console.js` reads it at request time. **Do not embed it back into a Python string.** Two bugs came from that:
 
-That shipped as `esc(head) + "\n\n" +`, i.e. a JS double-quoted string containing two raw newlines — `SyntaxError: Invalid or unexpected token`. Chrome discards the entire script, so the page rendered its HTML shell while `probe`, `refresh` and `copyVlc` were all `undefined`: no polling, no file table, no Range probe. Every HTTP test passed throughout, because the API was always fine — only the browser was dead.
+1. `CONSOLE_HTML`/`CONSOLE_JS` were non-raw triple-quoted strings, so the JS line `esc(head) + "\n\n" +` shipped as two **real newline bytes** inside a double-quoted literal — `SyntaxError`, and Chrome discarded the whole script. The page rendered its HTML shell while `probe`, `refresh` and `copyVlc` were all `undefined`. Every HTTP test passed throughout: the API was always fine, only the browser was dead.
+2. Once the script moved to `/console.js`, the on-disk `console.js` and the string `CONSOLE_JS` both still existed and **drifted** (6674 vs 6671 bytes). `/console.js` served the string, so editing the file did nothing.
 
-**Use `\\n` in that string for a JS escape.** The guard is `ConsoleScriptSyntaxTests`, which extracts the `<script>` body and runs `node --check` on it (skipped when node is absent; ubuntu-latest has it). Anything that renders HTML without executing JS needs that kind of real-parse test — asserting on substrings cannot catch it.
+`ConsoleScriptSyntaxTests` pins this: `node --check` on the served bytes (skipped when node is absent), byte-identity between what's served and `console.js` on disk, and `hasattr(console, "CONSOLE_JS") == False`.
+
+There is deliberately **no quote-balancing heuristic** as a node-free fallback. Two were written and both were wrong — regex character classes (`/[<>&"]/`) and comments contain unbalanced quotes, so they reported failures on valid code. `test_served_script_is_the_file_on_disk` plus `node --check` cover the defect exactly; a heuristic that cries wolf is worse than none.
+
+### Console features worth knowing
+
+- **Mobile**: `<meta name="viewport">` is the load-bearing line — without it a phone lays out at ~980px. Inputs are `font-size: 16px` so iOS Safari doesn't zoom on focus, and tables sit in `.scroll` wrappers so they scroll sideways instead of widening the page.
+- **Clipboard magnets**: three paths — a native `paste` event (needs no permission prompt, the reliable one), a `focus` read via `navigator.clipboard.readText()`, and drop. All funnel through `magnetFrom()`, which extracts `magnet:?…` from surrounding text because magnets get shared inside page URLs. `readClipboard()` returns `""` on a missing API **or** a rejected permission; it must never throw or the page breaks on a refused prompt.
+- **Download** (`save` button per file) uses `fetch` + `URL.createObjectURL`, not a plain `<a download>`: a bare link would bypass the piece gate and hand back sparse zeros. The filename is torrent-supplied and untrusted, so it goes through the `download` attribute rather than a header needing escaping. Revoke the object URL on a timer — revoking synchronously can cancel the download.
+- Buttons are wired via `data-act`, not inline `onclick`, except where a row template needs the file index.
 
 ### Never serialise models with `__dict__`
 

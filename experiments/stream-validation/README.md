@@ -88,15 +88,39 @@ uvicorn console:app --port 8000
 
 Then open <http://127.0.0.1:8000/console>.
 
+The console is meant to be usable on a phone, since the useful place to watch
+a download is not next to the machine running it:
+
+- **Paste a magnet, or copy one somewhere else and tap the field** — the page
+  reads your clipboard on focus and will pick a magnet out of whatever text
+  you copied, since magnets get shared inside page URLs. The `Paste magnet`
+  button is the explicit path. If clipboard permission is refused or the
+  browser has no async clipboard API, nothing breaks; you just type or paste
+  normally.
+- **`save` on any file** downloads it through the same Range layer the player
+  uses, so you get real bytes rather than the sparse zeros a plain file link
+  would hand back from a partially allocated file.
+- Tables scroll sideways inside their card instead of widening the page, so
+  the page never forces a horizontal scroll.
+
 The **Range probe** sends a real `Range` header and reports the status,
 headers and byte count — `206 Partial Content` is the thing to confirm.
 The `<video>` element only proves a browser will play the head of the file;
 far-ahead seeking on a partial download needs VLC/MX Player, which is the
 actual gate (PLAN.md §23).
 
-There is also a manual CI workflow at `.github/workflows/validate.yml`
-(`Actions → Stream validation → Run workflow`) that starts everything on a
-self-hosted runner and holds it open for testing.
+There is also a manual workflow at `.github/workflows/validate.yml`
+(`Actions → Stream validation → Run workflow`) that stands the whole thing up
+on a GitHub-hosted runner and publishes it through a temporary Cloudflare
+tunnel. It ships **no default magnet** — leave the `magnet` input blank and
+the console starts empty, which is also the only way to exercise creating more
+than one task. The quick tunnel has no authentication, so anyone with the URL
+can add magnets until the job ends.
+
+> An MP4 whose `moov` atom sits at the **end** cannot play before that data
+> arrives — Chrome reads the tail for the sample index and fails with a demuxer
+> error. That is the piece gate correctly refusing to fabricate bytes, not a
+> bug in it. Partial playback needs a container with its index at the front.
 
 ## Environment
 
