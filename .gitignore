@@ -1,0 +1,30 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (README creates .venv at the repo root)
+.venv/
+venv/
+env/
+
+# Local secrets. QBIT_PASSWORD and the qBittorrent WebUI password live here.
+# .env.example IS tracked — PLAN.md requires it as a template.
+.env
+.env.*
+!.env.example
+
+# qBittorrent runtime state
+# qbit-config/ holds the WebUI config and credentials — never commit it.
+experiments/stream-validation/qbit-config/
+# downloads/ holds partial torrent data; large and user-specific.
+experiments/stream-validation/downloads/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS noise
+.DS_Store
+Thumbs.db
